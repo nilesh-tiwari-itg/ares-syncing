@@ -3,6 +3,7 @@
 // Node 18+ (uses global fetch)
 
 import dotenv from "dotenv";
+import fs from "fs";
 dotenv.config();
 
 /**
@@ -64,13 +65,14 @@ function numericIdFromGid(gid) {
  * ---- 1) SOURCE QUERIES ----
  */
 
-// 1.1 Fetch a company (with locations, roles, contacts, and **per-customer role assignments**)
+// 1.1 Fetch a company (with locations, roles, contacts, and per-customer role assignments)
 const QUERY_SOURCE_COMPANY = `
   query GetCompany($id: ID!) {
     company(id: $id) {
       id
       name
       externalId
+      note
       metafields(first: 50) {
         edges {
           node {
@@ -88,6 +90,20 @@ const QUERY_SOURCE_COMPANY = `
             id
             name
             shippingAddress {
+              firstName
+              lastName
+              address1
+              address2
+              city
+              province
+              zip
+              country
+              countryCode
+              zoneCode
+              phone
+              companyName
+            }
+            billingAddress {
               firstName
               lastName
               address1
@@ -123,6 +139,7 @@ const QUERY_SOURCE_COMPANY = `
               phone
               firstName
               lastName
+              note
               tags
               defaultAddress {
                 address1
@@ -148,6 +165,16 @@ const QUERY_SOURCE_COMPANY = `
                     value
                   }
                 }
+              }
+              emailMarketingConsent {
+                marketingState
+                marketingOptInLevel
+                consentUpdatedAt
+              }
+              smsMarketingConsent {
+                marketingState
+                marketingOptInLevel
+                consentUpdatedAt
               }
               companyContactProfiles {
                 company {
@@ -519,6 +546,7 @@ function mapMetafieldsForSet(ownerId, metafieldsConnection) {
  * - If email exists, reuse
  * - Else create
  * - Then set metafields
+ * - For NEW customers, also mirror marketing consent (email + SMS)
  */
 async function upsertCustomerOnTargetFromSource(sourceCustomer) {
   const email = (sourceCustomer.email).trim();
@@ -536,7 +564,9 @@ async function upsertCustomerOnTargetFromSource(sourceCustomer) {
     "FindCustomerByEmail(TARGET)"
   );
   let targetCustomer = findData?.customers?.edges?.[0]?.node;
-  if (targetCustomer) {
+  const isExisting = !!targetCustomer;
+
+  if (isExisting) {
     console.log(`👤 Target customer exists: ${email} (${targetCustomer.id})`);
   } else {
     // Create new customer
@@ -544,12 +574,37 @@ async function upsertCustomerOnTargetFromSource(sourceCustomer) {
     const input = {
       email,
     };
+
     if (sourceCustomer.firstName) input.firstName = sourceCustomer.firstName;
     if (sourceCustomer.lastName) input.lastName = sourceCustomer.lastName;
     if (sourceCustomer.phone) input.phone = sourceCustomer.phone;
+    if (sourceCustomer.note) input.note = sourceCustomer.note;
     if (Array.isArray(sourceCustomer.tags) && sourceCustomer.tags.length) {
       input.tags = sourceCustomer.tags;
     }
+
+    // Mirror marketing consent for NEW customers only
+    const emailConsent = sourceCustomer.emailMarketingConsent;
+    if (emailConsent && emailConsent.marketingState) {
+      input.emailMarketingConsent = {
+        marketingState: emailConsent.marketingState,
+        // marketingOptInLevel is optional; include if present
+        ...(emailConsent.marketingOptInLevel && {
+          marketingOptInLevel: emailConsent.marketingOptInLevel,
+        }),
+      };
+    }
+
+    const smsConsent = sourceCustomer.smsMarketingConsent;
+    if (smsConsent && smsConsent.marketingState) {
+      input.smsMarketingConsent = {
+        marketingState: smsConsent.marketingState,
+        ...(smsConsent.marketingOptInLevel && {
+          marketingOptInLevel: smsConsent.marketingOptInLevel,
+        }),
+      };
+    }
+
     if (addr) {
       input.addresses = [
         {
@@ -603,21 +658,21 @@ async function upsertCustomerOnTargetFromSource(sourceCustomer) {
 }
 
 /**
- * Helper to map source shipping address -> CompanyAddressInput
+ * Helper to map source address -> CompanyAddressInput
  */
-function buildCompanyAddressInput(ship) {
-  if (!ship) return null;
+function buildCompanyAddressInput(addr) {
+  if (!addr) return null;
   return {
-    firstName: ship.firstName,
-    lastName: ship.lastName,
-    address1: ship.address1,
-    address2: ship.address2,
-    city: ship.city,
-    zoneCode: ship.zoneCode,
-    zip: ship.zip,
-    countryCode: ship.countryCode,
-    phone: ship.phone,
-    recipient: ship.companyName,
+    firstName: addr.firstName,
+    lastName: addr.lastName,
+    address1: addr.address1,
+    address2: addr.address2,
+    city: addr.city,
+    zoneCode: addr.zoneCode,
+    zip: addr.zip,
+    countryCode: addr.countryCode,
+    phone: addr.phone,
+    recipient: addr.companyName,
   };
 }
 
@@ -631,27 +686,45 @@ function buildCompanyAddressInput(ship) {
 async function createCompanyOnTargetFromSource(sourceCompany) {
   const companyName = sourceCompany.name;
   const externalId = sourceCompany.externalId || sourceCompany.id;
-  const srcLocations = sourceCompany.locations?.edges?.map(e => e.node) || [];
+  const note = sourceCompany.note || null;
+  const srcLocations = sourceCompany.locations?.edges?.map((e) => e.node) || [];
 
   // Base CompanyCreateInput
+  const companyInput = {
+    name: companyName,
+    externalId,
+  };
+  if (note) {
+    companyInput.note = note;
+  }
+
   const input = {
-    company: {
-      name: companyName,
-      externalId,
-    },
+    company: companyInput,
   };
 
-  // If we have at least one location, pass it as the initial companyLocation
+  // If we have at least one location with a shipping address, pass it as the initial companyLocation
   if (srcLocations.length > 0) {
     const firstLoc = srcLocations[0];
     const shippingAddressInput = buildCompanyAddressInput(firstLoc.shippingAddress);
-    input.companyLocation = {
-      name: firstLoc.name || companyName,
-      shippingAddress: shippingAddressInput,
-      billingSameAsShipping: true,
-    };
+    const billingAddressInput = buildCompanyAddressInput(firstLoc.billingAddress);
+
+    if (shippingAddressInput) {
+      input.companyLocation = {
+        name: firstLoc.name || companyName,
+        shippingAddress: shippingAddressInput,
+        billingSameAsShipping: !billingAddressInput,
+      };
+      if (billingAddressInput) {
+        input.companyLocation.billingAddress = billingAddressInput;
+      }
+    } else {
+      console.log(
+        `⚠️ First source location ${firstLoc.id} has no shipping address; creating company without initial location`
+      );
+    }
   }
-  console.log('---cc', input)
+
+  console.log("---cc", input);
 
   const createData = await graphqlRequest(
     TARGET_GQL,
@@ -662,7 +735,7 @@ async function createCompanyOnTargetFromSource(sourceCompany) {
   );
   const errors = createData?.companyCreate?.userErrors || [];
   if (errors.length) {
-    console.log('-----errrr', errors)
+    console.log("-----errrr", errors);
     throw new Error(`companyCreate userErrors: ${JSON.stringify(errors)}`);
   }
   const company = createData?.companyCreate?.company;
@@ -675,7 +748,7 @@ async function createCompanyOnTargetFromSource(sourceCompany) {
 
   // Map: roleName -> targetRoleId
   const roleNameToTargetRoleId = {};
-  (company.contactRoles?.edges || []).forEach(r => {
+  (company.contactRoles?.edges || []).forEach((r) => {
     if (r.node?.name && r.node?.id) {
       roleNameToTargetRoleId[r.node.name] = r.node.id;
     }
@@ -700,11 +773,25 @@ async function createCompanyOnTargetFromSource(sourceCompany) {
   for (let i = 1; i < srcLocations.length; i++) {
     const srcLoc = srcLocations[i];
     const shippingAddressInput = buildCompanyAddressInput(srcLoc.shippingAddress);
+    const billingAddressInput = buildCompanyAddressInput(srcLoc.billingAddress);
+
+    // If shipping address is null for this location, skip it
+    if (!shippingAddressInput) {
+      console.log(
+        `⚠️ Skipping source location ${srcLoc.id} (${srcLoc.name}) because shipping address is null`
+      );
+      continue;
+    }
+
     const locInput = {
       name: srcLoc.name || companyName,
       shippingAddress: shippingAddressInput,
-      billingSameAsShipping: true,
+      billingSameAsShipping: !billingAddressInput,
     };
+
+    if (billingAddressInput) {
+      locInput.billingAddress = billingAddressInput;
+    }
 
     const locData = await graphqlRequest(
       TARGET_GQL,
@@ -731,7 +818,7 @@ async function createCompanyOnTargetFromSource(sourceCompany) {
     }
   }
 
-  // Copy existing company metafields + tracking metafield
+  // Copy existing company metafields + hardcoded tracking metafields
   const metafields = mapMetafieldsForSet(companyId, sourceCompany.metafields);
   metafields.push(
     {
@@ -765,7 +852,6 @@ async function createCompanyOnTargetFromSource(sourceCompany) {
       { metafields },
       "MetafieldsSet(company TARGET)"
     );
-    console.log(`🏷️ Set ${metafields.length} metafield(s) on company TARGET`);
   }
 
   return {
@@ -824,7 +910,6 @@ async function ensureCompanyContactOnTarget(companyId, targetCustomerId) {
 async function syncCompanyContactRolesFromSource({
   sourceCompany,
   sourceCustomer,
-  targetCompanyId,
   targetCompanyContactId,
   sourceLocationIdToTargetLocationId,
   roleNameToTargetRoleId,
@@ -1001,6 +1086,10 @@ async function syncSingleCompany(companyIdOrGid) {
 
     // 3) For each contact, sync customer + contact + roles (+ orders later)
     const contacts = sourceCompany.contacts?.edges || [];
+    if (!contacts.length) {
+      console.log("ℹ️ Company has no contacts/customers; skipping customer sync.");
+    }
+
     for (const ce of contacts) {
       const contact = ce.node;
       const srcCust = contact.customer;
@@ -1051,7 +1140,6 @@ async function syncSingleCompany(companyIdOrGid) {
       await syncCompanyContactRolesFromSource({
         sourceCompany,
         sourceCustomer: srcCust,
-        targetCompanyId,
         targetCompanyContactId,
         sourceLocationIdToTargetLocationId,
         roleNameToTargetRoleId,
@@ -1060,12 +1148,13 @@ async function syncSingleCompany(companyIdOrGid) {
       // e) fetch orders for this customer on SOURCE (still not creating them on TARGET unless you uncomment)
       const sourceOrders = await fetchOrdersForSourceCustomer(srcCust.id);
       console.log(
-        `📦 Found ${sourceOrders.length} orders on SOURCE for customer ${srcCust.email || srcCust.id
+        `📦 Found ${sourceOrders.length} orders on SOURCE for customer ${
+          srcCust.email || srcCust.id
         }`
       );
 
-      // If/when you're ready, uncomment this block to actually create orders
       /*
+      // If/when you're ready, uncomment this block to actually create orders
       for (const order of sourceOrders) {
         try {
           await createOrderViaOrderCreate_GQL(order, targetCustomer);
@@ -1091,15 +1180,31 @@ async function syncSingleCompany(companyIdOrGid) {
  * MAIN runner
  */
 async function main() {
-  const companyIds = process.argv.slice(2);
-  if (!companyIds.length) {
-    console.error(
-      "Usage: node syncCompaniesShopifyToShopify.js <companyId or GID> [moreIds...]"
-    );
+  let ids = [];
+
+  // 1) If company IDs are passed via CLI, use those
+  if (process.argv.length > 2) {
+    ids = process.argv.slice(2);
+    console.log("📌 Using company IDs from CLI:", ids);
+  }
+  // 2) Otherwise read companies.json
+  else {
+    try {
+      const file = JSON.parse(fs.readFileSync("./companies.json", "utf8"));
+      ids = file.companies || [];
+      console.log("📌 Using company IDs from companies.json:", ids);
+    } catch (err) {
+      console.error("❌ No CLI IDs and failed reading companies.json:", err.message);
+      process.exit(1);
+    }
+  }
+
+  if (!ids.length) {
+    console.error("❌ No company IDs found. Provide CLI args OR companies.json.");
     process.exit(1);
   }
 
-  for (const cid of companyIds) {
+  for (const cid of ids) {
     try {
       await syncSingleCompany(cid);
     } catch (e) {
