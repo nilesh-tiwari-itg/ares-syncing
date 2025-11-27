@@ -201,6 +201,63 @@ const QUERY_SOURCE_COMPANY = `
   }
 `;
 
+/********************************************************************
+ * Fetch ALL orders for a B2B company using company.orders
+ * Paginate properly
+ * Filter only orders created in YEAR 2025
+ ********************************************************************/
+const QUERY_COMPANY_ORDERS_CONNECTION = `
+  query CompanyOrdersConnection($id: ID!, $cursor: String) {
+    company(id: $id) {
+      orders(first: 250, after: $cursor) {
+        edges {
+          cursor
+          node {
+            id
+            createdAt
+            name
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+`;
+
+async function fetchCompanyOrdersCount2025(companyGid) {
+  let count = 0;
+  let cursor = null;
+
+  while (true) {
+    const data = await graphqlRequest(
+      SOURCE_GQL,
+      SOURCE_ACCESS_TOKEN,
+      QUERY_COMPANY_ORDERS_CONNECTION,
+      { id: companyGid, cursor },
+      "CompanyOrdersConnection(SOURCE)"
+    );
+
+    const ordersConn = data?.company?.orders;
+    if (!ordersConn) break;
+
+    for (const edge of ordersConn.edges) {
+      const order = edge.node;
+
+      // Only 2025
+      const year = new Date(order.createdAt).getFullYear();
+      if (year === 2025) count++;
+    }
+
+    if (!ordersConn.pageInfo.hasNextPage) break;
+    cursor = ordersConn.pageInfo.endCursor;
+  }
+
+  return count;
+}
+
 // 1.2 Fetch orders for a customer from SOURCE
 const QUERY_SOURCE_ORDERS_BY_CUSTOMER = `
   query OrdersByCustomer($query: String!, $cursor: String) {
@@ -548,7 +605,7 @@ function mapMetafieldsForSet(ownerId, metafieldsConnection) {
  * - Then set metafields
  * - For NEW customers, also mirror marketing consent (email + SMS)
  */
-async function upsertCustomerOnTargetFromSource(sourceCustomer) {
+async function upsertCustomerOnTargetFromSource(sourceCustomer, tier) {
   const email = (sourceCustomer.email).trim();
   if (!email) {
     console.log(`⚠️ Skipping source customer without email: ${sourceCustomer.id}`);
@@ -580,7 +637,14 @@ async function upsertCustomerOnTargetFromSource(sourceCustomer) {
     if (sourceCustomer.phone) input.phone = sourceCustomer.phone;
     if (sourceCustomer.note) input.note = sourceCustomer.note;
     if (Array.isArray(sourceCustomer.tags) && sourceCustomer.tags.length) {
-      input.tags = sourceCustomer.tags;
+      input.tags = [...sourceCustomer.tags];
+    } else {
+      input.tags = [];
+    }
+
+    // Add tier tag
+    if (tier) {
+      input.tags.push(`Tier_${tier}`);
     }
 
     // Mirror marketing consent for NEW customers only
@@ -683,7 +747,7 @@ function buildCompanyAddressInput(addr) {
  *  - sourceLocationIdToTargetLocationId: Map
  *  - roleNameToTargetRoleId: { [name]: id }
  */
-async function createCompanyOnTargetFromSource(sourceCompany) {
+async function createCompanyOnTargetFromSource(sourceCompany, orderCount2025) {
   const companyName = sourceCompany.name;
   const externalId = sourceCompany.externalId || sourceCompany.id;
   const note = sourceCompany.note || null;
@@ -723,8 +787,6 @@ async function createCompanyOnTargetFromSource(sourceCompany) {
       );
     }
   }
-
-  console.log("---cc", input);
 
   const createData = await graphqlRequest(
     TARGET_GQL,
@@ -840,7 +902,14 @@ async function createCompanyOnTargetFromSource(sourceCompany) {
       namespace: "custom",
       key: "level",
       type: "single_line_text_field",
-      value: "Bronze",
+      value:
+        orderCount2025 > 25
+          ? "Platinum"
+          : orderCount2025 > 10
+            ? "Gold"
+            : orderCount2025 > 5
+              ? "Silver"
+              : "Bronze",
     }
   );
 
@@ -1076,13 +1145,24 @@ async function syncSingleCompany(companyIdOrGid) {
     // 1) Fetch company from SOURCE
     const sourceCompany = await fetchSourceCompany(companyGid);
     console.log(`SOURCE company: ${sourceCompany.name} (${sourceCompany.id})`);
+    const orderCount2025 = await fetchCompanyOrdersCount2025(companyGid);
+    console.log(`📦 B2B 2025 order count for company: ${orderCount2025}`);
+    const tier =
+      orderCount2025 > 25
+        ? "Platinum"
+        : orderCount2025 > 10
+          ? "Gold"
+          : orderCount2025 > 5
+            ? "Silver"
+            : "Bronze";
+    console.log(`🏷 Tier for company: ${tier}`);
 
     // 2) Create company + all locations on TARGET
     const {
       companyId: targetCompanyId,
       sourceLocationIdToTargetLocationId,
       roleNameToTargetRoleId,
-    } = await createCompanyOnTargetFromSource(sourceCompany);
+    } = await createCompanyOnTargetFromSource(sourceCompany, orderCount2025);
 
     // 3) For each contact, sync customer + contact + roles (+ orders later)
     const contacts = sourceCompany.contacts?.edges || [];
@@ -1103,7 +1183,7 @@ async function syncSingleCompany(companyIdOrGid) {
       );
 
       // a) upsert customer on TARGET
-      const targetCustomer = await upsertCustomerOnTargetFromSource(srcCust);
+      const targetCustomer = await upsertCustomerOnTargetFromSource(srcCust, tier);
       if (!targetCustomer) continue;
 
       // b) ensure companyContact on TARGET
@@ -1148,13 +1228,11 @@ async function syncSingleCompany(companyIdOrGid) {
       // e) fetch orders for this customer on SOURCE (still not creating them on TARGET unless you uncomment)
       const sourceOrders = await fetchOrdersForSourceCustomer(srcCust.id);
       console.log(
-        `📦 Found ${sourceOrders.length} orders on SOURCE for customer ${
-          srcCust.email || srcCust.id
+        `📦 Found ${sourceOrders.length} orders on SOURCE for customer ${srcCust.email || srcCust.id
         }`
       );
 
       /*
-      // If/when you're ready, uncomment this block to actually create orders
       for (const order of sourceOrders) {
         try {
           await createOrderViaOrderCreate_GQL(order, targetCustomer);
