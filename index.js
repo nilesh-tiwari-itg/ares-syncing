@@ -214,8 +214,12 @@ const QUERY_COMPANY_ORDERS_CONNECTION = `
           cursor
           node {
             id
-            createdAt
             name
+            createdAt
+            displayFulfillmentStatus
+            cancelledAt
+            closedAt
+            tags
           }
         }
         pageInfo {
@@ -226,6 +230,7 @@ const QUERY_COMPANY_ORDERS_CONNECTION = `
     }
   }
 `;
+
 
 async function fetchCompanyOrdersCount2025(companyGid) {
   let count = 0;
@@ -245,10 +250,22 @@ async function fetchCompanyOrdersCount2025(companyGid) {
 
     for (const edge of ordersConn.edges) {
       const order = edge.node;
-
-      // Only 2025
       const year = new Date(order.createdAt).getFullYear();
-      if (year === 2025) count++;
+
+      if (year !== 2025) continue;
+
+      // ---- Qualification Logic ----
+      const isFulfilled = order.displayFulfillmentStatus === "FULFILLED";
+      const notCancelled = order.cancelledAt === null;
+      const isClosed = order.closedAt !== null;
+
+      const hasExcludeTag = Array.isArray(order.tags)
+        ? order.tags.includes("tier_exclude")
+        : false;
+
+      if (isFulfilled && notCancelled && isClosed && !hasExcludeTag) {
+        count++;
+      }
     }
 
     if (!ordersConn.pageInfo.hasNextPage) break;
@@ -257,6 +274,7 @@ async function fetchCompanyOrdersCount2025(companyGid) {
 
   return count;
 }
+
 
 // 1.2 Fetch orders for a customer from SOURCE
 const QUERY_SOURCE_ORDERS_BY_CUSTOMER = `
@@ -387,7 +405,7 @@ async function fetchOrdersForSourceCustomer(customerGid) {
  * ---- 2) TARGET MUTATIONS & HELPERS ----
  */
 
-// 2.1 customerCreate (from your doc) :contentReference[oaicite:1]{index=1}
+// 2.1 customerCreate
 const MUTATION_CUSTOMER_CREATE = `
   mutation customerCreate($input: CustomerInput!) {
     customerCreate(input: $input) {
@@ -395,6 +413,144 @@ const MUTATION_CUSTOMER_CREATE = `
         id
         email
         tags
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+// Fetch metafields for an existing customer on TARGET
+const QUERY_TARGET_CUSTOMER_METAFIELDS = `
+  query CustomerWithMetafields($id: ID!) {
+    customer(id: $id) {
+      id
+      metafields(first: 100) {
+        edges {
+          node {
+            namespace
+            key
+            type
+            value
+          }
+        }
+      }
+    }
+  }
+`;
+
+// Fetch metafields for an existing company on TARGET
+const QUERY_TARGET_COMPANY_METAFIELDS = `
+  query CompanyWithMetafields($id: ID!) {
+    company(id: $id) {
+      id
+      metafields(first: 100) {
+        edges {
+          node {
+            namespace
+            key
+            type
+            value
+          }
+        }
+      }
+    }
+  }
+`;
+
+
+const QUERY_TARGET_CONTACT_LOCATION_ROLES = `
+  query CompanyContacts($companyId: ID!) {
+    company(id: $companyId) {
+      contacts(first: 100) {
+        edges {
+          node {
+            id
+            customer {
+              id
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+
+const QUERY_TARGET_COMPANY_CONTACT = `
+  query CompanyContacts($companyId: ID!) {
+    company(id: $companyId) {
+      contacts(first: 100) {
+        edges {
+          node {
+            id
+            customer {
+              id
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+
+// NEW: customerUpdate
+const MUTATION_CUSTOMER_UPDATE = `
+  mutation customerUpdate($input: CustomerInput!) {
+    customerUpdate(input: $input) {
+      customer {
+        id
+        email
+        tags
+        firstName
+        lastName
+        phone
+        note
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+// NEW: customerEmailMarketingConsentUpdate
+const MUTATION_CUSTOMER_EMAIL_MARKETING_CONSENT_UPDATE = `
+  mutation customerEmailMarketingConsentUpdate($input: CustomerEmailMarketingConsentUpdateInput!) {
+    customerEmailMarketingConsentUpdate(input: $input) {
+      customer {
+        id
+        email
+        emailMarketingConsent {
+          marketingState
+          marketingOptInLevel
+          consentUpdatedAt
+        }
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+// NEW: customerSmsMarketingConsentUpdate
+const MUTATION_CUSTOMER_SMS_MARKETING_CONSENT_UPDATE = `
+  mutation customerSmsMarketingConsentUpdate($input: CustomerSmsMarketingConsentUpdateInput!) {
+    customerSmsMarketingConsentUpdate(input: $input) {
+      customer {
+        id
+        phone
+        smsMarketingConsent {
+          marketingState
+          marketingOptInLevel
+          consentUpdatedAt
+        }
       }
       userErrors {
         field
@@ -418,7 +574,38 @@ const QUERY_TARGET_CUSTOMER_BY_EMAIL = `
   }
 `;
 
-// 2.3 companyCreate (from your doc) :contentReference[oaicite:2]{index=2}
+// NEW: Find company by externalId on TARGET
+const QUERY_TARGET_COMPANY_BY_EXTERNAL_ID = `
+  query CompaniesByExternalId($q: String!) {
+    companies(first: 1, query: $q) {
+      edges {
+        node {
+          id
+          name
+          externalId
+          contactRoles(first: 20) {
+            edges {
+              node {
+                id
+                name
+              }
+            }
+          }
+          locations(first: 50) {
+            edges {
+              node {
+                id
+                name
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+// 2.3 companyCreate
 const MUTATION_COMPANY_CREATE = `
   mutation CompanyCreate($input: CompanyCreateInput!) {
     companyCreate(input: $input) {
@@ -460,6 +647,25 @@ const MUTATION_COMPANY_CREATE = `
         field
         message
         code
+      }
+    }
+  }
+`;
+
+// NEW: companyUpdate
+const MUTATION_COMPANY_UPDATE = `
+  mutation companyUpdate($companyId: ID!, $input: CompanyInput!) {
+    companyUpdate(companyId: $companyId, input: $input) {
+      company {
+        id
+        name
+        externalId
+        note
+        customerSince
+      }
+      userErrors {
+        field
+        message
       }
     }
   }
@@ -513,7 +719,6 @@ const MUTATION_METAFIELDS_SET = `
   }
 `;
 
-// 2.5 companyAssignCustomerAsContact :contentReference[oaicite:4]{index=4}
 const MUTATION_COMPANY_ASSIGN_CUSTOMER_AS_CONTACT = `
   mutation companyAssignCustomerAsContact($companyId: ID!, $customerId: ID!) {
     companyAssignCustomerAsContact(companyId: $companyId, customerId: $customerId) {
@@ -529,7 +734,6 @@ const MUTATION_COMPANY_ASSIGN_CUSTOMER_AS_CONTACT = `
   }
 `;
 
-// 2.6 companyLocationAssignRoles :contentReference[oaicite:5]{index=5}
 const MUTATION_COMPANY_LOCATION_ASSIGN_ROLES = `
   mutation companyLocationAssignRoles($companyLocationId: ID!, $rolesToAssign: [CompanyLocationRoleAssign!]!) {
     companyLocationAssignRoles(companyLocationId: $companyLocationId, rolesToAssign: $rolesToAssign) {
@@ -598,15 +802,226 @@ function mapMetafieldsForSet(ownerId, metafieldsConnection) {
   return list;
 }
 
+
+function buildMetafieldMap(connection) {
+  const map = {};
+  const edges = connection?.edges || [];
+
+  for (const edge of edges) {
+    const m = edge.node;
+    if (!m.namespace || !m.key || m.value == null || !m.type) continue;
+
+    const key = `${m.namespace}.${m.key}`;
+    map[key] = {
+      namespace: m.namespace,
+      key: m.key,
+      type: m.type,
+      value: String(m.value)
+    };
+  }
+  return map;
+}
+
+function mergeMetafields(sourceConn, targetConn, ownerId) {
+  const sourceMap = buildMetafieldMap(sourceConn);
+  const targetMap = buildMetafieldMap(targetConn);
+
+  const final = { ...targetMap };
+
+  // Overwrite target with source values
+  for (const key in sourceMap) {
+    final[key] = sourceMap[key];
+  }
+
+  return Object.values(final).map(m => ({
+    ownerId,
+    namespace: m.namespace,
+    key: m.key,
+    type: m.type,
+    value: m.value
+  }));
+}
+
+
+/**
+ * Build and run customerUpdate for existing customers on TARGET
+ * - Overwrite basic fields with SOURCE data (full sync style)
+ * - Overwrite tags with SOURCE tags + Tier tag
+ */
+async function updateCustomerOnTargetFromSource(sourceCustomer, tier, targetCustomer) {
+  const email = (sourceCustomer.email || "").trim();
+  const input = {
+    id: targetCustomer.id,
+  };
+
+  if (email) {
+    input.email = email;
+  }
+
+  // Full overwrite semantics for these scalar fields
+  input.firstName = sourceCustomer.firstName || null;
+  input.lastName = sourceCustomer.lastName || null;
+  input.phone = sourceCustomer.phone || null;
+  input.note = sourceCustomer.note || null;
+
+  // Tags: overwrite with source tags + Tier tag
+  let tags = [];
+  if (Array.isArray(sourceCustomer.tags)) {
+    tags = [...sourceCustomer.tags];
+  }
+  if (tier) {
+    const tierTag = `Tier_${tier}`;
+    if (!tags.includes(tierTag)) {
+      tags.push(tierTag);
+    }
+  }
+  input.tags = tags;
+
+
+  // -----------------------------
+  // 🔥 NEW: ADDRESS UPDATE LOGIC
+  // -----------------------------
+  const addr = sourceCustomer.defaultAddress;
+
+  if (addr) {
+    input.addresses = [
+      {
+        address1: addr.address1,
+        address2: addr.address2,
+        city: addr.city,
+        countryCode: addr.countryCodeV2,
+        provinceCode: addr.provinceCode,
+        zip: addr.zip,
+        phone: addr.phone,
+        firstName: addr.firstName || sourceCustomer.firstName,
+        lastName: addr.lastName || sourceCustomer.lastName,
+        company: addr.company,
+      },
+    ]
+
+  } else {
+    console.log(`ℹ️ No defaultAddress for ${email}, skipping address update`);
+  }
+
+  const updateData = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    MUTATION_CUSTOMER_UPDATE,
+    { input },
+    "customerUpdate(TARGET)"
+  );
+
+  const errors = updateData?.customerUpdate?.userErrors || [];
+  if (errors.length) {
+    throw new Error(`customerUpdate userErrors: ${JSON.stringify(errors)}`);
+  }
+
+  console.log(
+    `🔁 Updated existing customer on TARGET: ${email || targetCustomer.email} (${targetCustomer.id})`
+  );
+}
+
+/**
+ * Mirror email marketing consent for existing customers
+ */
+async function updateCustomerEmailConsentOnTargetFromSource(sourceCustomer, targetCustomer) {
+  const emailConsent = sourceCustomer.emailMarketingConsent;
+  if (!emailConsent || !emailConsent.marketingState) {
+    return;
+  }
+
+  const state = emailConsent.marketingState === "NOT_SUBSCRIBED"
+    ? "UNSUBSCRIBED"
+    : emailConsent.marketingState;
+
+  const input = {
+    customerId: targetCustomer.id,
+    emailMarketingConsent: {
+      marketingState: state,
+    },
+  };
+
+  if (emailConsent.marketingOptInLevel) {
+    input.emailMarketingConsent.marketingOptInLevel = emailConsent.marketingOptInLevel;
+  }
+  if (emailConsent.consentUpdatedAt) {
+    input.emailMarketingConsent.consentUpdatedAt = emailConsent.consentUpdatedAt;
+  }
+
+  const data = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    MUTATION_CUSTOMER_EMAIL_MARKETING_CONSENT_UPDATE,
+    { input },
+    "customerEmailMarketingConsentUpdate(TARGET)"
+  );
+
+  const errors = data?.customerEmailMarketingConsentUpdate?.userErrors || [];
+  if (errors.length) {
+    throw new Error(
+      `customerEmailMarketingConsentUpdate userErrors: ${JSON.stringify(errors)}`
+    );
+  }
+
+  console.log(
+    `📧 Synced email marketing consent for customer ${targetCustomer.id}`
+  );
+}
+
+
+/**
+ * Mirror SMS marketing consent for existing customers
+ */
+async function updateCustomerSmsConsentOnTargetFromSource(sourceCustomer, targetCustomer) {
+  const smsConsent = sourceCustomer.smsMarketingConsent;
+  if (!smsConsent || !smsConsent.marketingState) {
+    return;
+  }
+
+  const input = {
+    customerId: targetCustomer.id,
+    smsMarketingConsent: {
+      marketingState: smsConsent.marketingState,
+    },
+  };
+
+  if (smsConsent.marketingOptInLevel) {
+    input.smsMarketingConsent.marketingOptInLevel = smsConsent.marketingOptInLevel;
+  }
+  if (smsConsent.consentUpdatedAt) {
+    input.smsMarketingConsent.consentUpdatedAt = smsConsent.consentUpdatedAt;
+  }
+
+  const data = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    MUTATION_CUSTOMER_SMS_MARKETING_CONSENT_UPDATE,
+    { input },
+    "customerSmsMarketingConsentUpdate(TARGET)"
+  );
+
+  const errors = data?.customerSmsMarketingConsentUpdate?.userErrors || [];
+  if (errors.length) {
+    throw new Error(
+      `customerSmsMarketingConsentUpdate userErrors: ${JSON.stringify(errors)}`
+    );
+  }
+
+  console.log(
+    `📱 Synced SMS marketing consent for customer ${targetCustomer.id}`
+  );
+}
+
 /**
  * Upsert a customer on TARGET based on source customer
- * - If email exists, reuse
+ * - If email exists, reuse and UPDATE (full sync)
  * - Else create
  * - Then set metafields
  * - For NEW customers, also mirror marketing consent (email + SMS)
+ * - For EXISTING customers, update marketing consent via dedicated mutations
  */
 async function upsertCustomerOnTargetFromSource(sourceCustomer, tier) {
-  const email = (sourceCustomer.email).trim();
+  const email = (sourceCustomer.email || "").trim();
   if (!email) {
     console.log(`⚠️ Skipping source customer without email: ${sourceCustomer.id}`);
     return null;
@@ -625,6 +1040,11 @@ async function upsertCustomerOnTargetFromSource(sourceCustomer, tier) {
 
   if (isExisting) {
     console.log(`👤 Target customer exists: ${email} (${targetCustomer.id})`);
+
+    // Full sync update for existing customers
+    await updateCustomerOnTargetFromSource(sourceCustomer, tier, targetCustomer);
+    await updateCustomerEmailConsentOnTargetFromSource(sourceCustomer, targetCustomer);
+    await updateCustomerSmsConsentOnTargetFromSource(sourceCustomer, targetCustomer);
   } else {
     // Create new customer
     const addr = sourceCustomer.defaultAddress;
@@ -652,7 +1072,6 @@ async function upsertCustomerOnTargetFromSource(sourceCustomer, tier) {
     if (emailConsent && emailConsent.marketingState) {
       input.emailMarketingConsent = {
         marketingState: emailConsent.marketingState,
-        // marketingOptInLevel is optional; include if present
         ...(emailConsent.marketingOptInLevel && {
           marketingOptInLevel: emailConsent.marketingOptInLevel,
         }),
@@ -703,19 +1122,33 @@ async function upsertCustomerOnTargetFromSource(sourceCustomer, tier) {
   }
 
   // Copy metafields
-  const mf = mapMetafieldsForSet(
-    targetCustomer.id,
-    sourceCustomer.metafields
+  // Fetch target customer metafields for merging
+  const targetMfData = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    QUERY_TARGET_CUSTOMER_METAFIELDS,
+    { id: targetCustomer.id },
+    "CustomerWithMetafields(TARGET)"
   );
-  if (mf.length) {
+
+
+  const mergedMf = mergeMetafields(
+    sourceCustomer.metafields,
+    targetMfData.customer.metafields,
+    targetCustomer.id
+  );
+
+
+  if (mergedMf.length) {
     await graphqlRequest(
       TARGET_GQL,
       TARGET_ACCESS_TOKEN,
       MUTATION_METAFIELDS_SET,
-      { metafields: mf },
+      { metafields: mergedMf },
       "MetafieldsSet(customer TARGET)"
     );
-    console.log(`🏷️ Copied ${mf.length} customer metafield(s) for ${email}`);
+
+    console.log(`🏷️ Merged ${mergedMf.length} customer metafields`);
   }
 
   return targetCustomer;
@@ -931,6 +1364,101 @@ async function createCompanyOnTargetFromSource(sourceCompany, orderCount2025) {
 }
 
 /**
+ * Update existing company on TARGET from SOURCE
+ * - name, note, externalId, customerSince (if you later add createdAt to source query)
+ */
+async function updateCompanyOnTargetFromSource(sourceCompany, targetCompanyId, orderCount2025) {
+  // 1️⃣ Update basic company fields first
+  const input = {
+    name: sourceCompany.name || null,
+    note: sourceCompany.note || null,
+    externalId: sourceCompany.externalId || sourceCompany.id,
+  };
+
+  if (sourceCompany.customerSince) {
+    input.customerSince = sourceCompany.customerSince;
+  }
+
+  const data = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    MUTATION_COMPANY_UPDATE,
+    {
+      companyId: targetCompanyId,
+      input,
+    },
+    "companyUpdate(TARGET)"
+  );
+
+  const errors = data?.companyUpdate?.userErrors || [];
+  if (errors.length) {
+    console.error(`companyUpdate userErrors: ${JSON.stringify(errors)}`);
+  } else {
+    console.log(`🔄 Updated existing company on TARGET (${targetCompanyId})`);
+  }
+
+  // 2️⃣ Fetch existing metafields from TARGET for merging
+  const targetMfData = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    QUERY_TARGET_COMPANY_METAFIELDS,
+    { id: targetCompanyId },
+    "CompanyWithMetafields(TARGET)"
+  );
+
+  // 3️⃣ Merge metafields (source overwrites, target keeps its unmatched keys)
+  let mergedMf = mergeMetafields(
+    sourceCompany.metafields,
+    targetMfData.company.metafields,
+    targetCompanyId
+  );
+
+  // 4️⃣ Re-apply forced metafields (overwrite after merge)
+  mergedMf.push(
+    {
+      ownerId: targetCompanyId,
+      namespace: "custom",
+      key: "source_company_id",
+      type: "single_line_text_field",
+      value: sourceCompany.id
+    },
+    {
+      ownerId: targetCompanyId,
+      namespace: "custom",
+      key: "isActive",
+      type: "boolean",
+      value: "True"
+    },
+    {
+      ownerId: targetCompanyId,
+      namespace: "custom",
+      key: "level",
+      type: "single_line_text_field",
+      value:
+        orderCount2025 > 25
+          ? "Platinum"
+          : orderCount2025 > 10
+            ? "Gold"
+            : orderCount2025 > 5
+              ? "Silver"
+              : "Bronze"
+    }
+  );
+
+  // 5️⃣ Apply metafields back to TARGET
+  await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    MUTATION_METAFIELDS_SET,
+    { metafields: mergedMf },
+    "MetafieldsSet(company TARGET)"
+  );
+
+  console.log(`🏷️ Merged ${mergedMf.length} company metafields (${targetCompanyId})`);
+}
+
+
+/**
  * In-memory cache so we don't create multiple companyContacts
  * for the same (companyId, customerId) within a single run.
  */
@@ -942,10 +1470,35 @@ const companyContactCache = new Map(); // key: `${companyId}:${customerId}` -> c
  */
 async function ensureCompanyContactOnTarget(companyId, targetCustomerId) {
   const key = `${companyId}:${targetCustomerId}`;
+
+  // 1️⃣ Local cache first
   if (companyContactCache.has(key)) {
     return companyContactCache.get(key);
   }
 
+  // 2️⃣ Fetch all company contacts on TARGET
+  const lookup = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    QUERY_TARGET_COMPANY_CONTACT,
+    { companyId },
+    "CompanyContacts(TARGET)"
+  );
+
+  const contacts = lookup?.company?.contacts?.edges || [];
+
+  // 3️⃣ Check if this customer is already linked
+  const existing = contacts.find(
+    c => c.node.customer?.id === targetCustomerId
+  );
+
+  if (existing) {
+    console.log(`👥 Existing companyContact found: ${existing.node.id}`);
+    companyContactCache.set(key, existing.node.id);
+    return existing.node.id;
+  }
+
+  // 4️⃣ Create new companyContact
   const data = await graphqlRequest(
     TARGET_GQL,
     TARGET_ACCESS_TOKEN,
@@ -953,24 +1506,24 @@ async function ensureCompanyContactOnTarget(companyId, targetCustomerId) {
     { companyId, customerId: targetCustomerId },
     "companyAssignCustomerAsContact(TARGET)"
   );
+
   const errors = data?.companyAssignCustomerAsContact?.userErrors || [];
   if (errors.length) {
     throw new Error(
       `companyAssignCustomerAsContact userErrors: ${JSON.stringify(errors)}`
     );
   }
+
   const contactId =
-    data?.companyAssignCustomerAsContact?.companyContact?.id;
-  if (!contactId) {
-    throw new Error("companyAssignCustomerAsContact returned no companyContact");
-  }
+    data.companyAssignCustomerAsContact.companyContact.id;
+
+  console.log(`👥 Created companyContact ${contactId}`);
 
   companyContactCache.set(key, contactId);
-  console.log(
-    `👥 Created/linked companyContact ${contactId} for customer ${targetCustomerId} in company ${companyId}`
-  );
   return contactId;
 }
+
+
 
 /**
  * Assign roles for a companyContact on all mapped locations,
@@ -1038,8 +1591,25 @@ async function syncCompanyContactRolesFromSource({
       },
       "companyLocationAssignRoles(TARGET)"
     );
+
     const rErrors = roleData?.companyLocationAssignRoles?.userErrors || [];
     if (rErrors.length) {
+      const duplicateOnly = rErrors.every((e) =>
+        typeof e.message === "string" &&
+        e.message.includes(
+          "Company contact has already been assigned a role in that company location."
+        )
+      );
+
+      if (duplicateOnly) {
+        console.log(
+          `🎭 Role "${role.name}" is already assigned to contact ${targetCompanyContactId} at location ${targetLocationId}; skipping`
+        );
+        // do NOT throw – just continue to next assignment
+        continue;
+      }
+
+      // Any other error is real and should still fail fast
       throw new Error(
         `companyLocationAssignRoles userErrors: ${JSON.stringify(rErrors)}`
       );
@@ -1129,7 +1699,8 @@ async function createOrderViaOrderCreate_GQL(sourceOrder, targetCustomer) {
 /**
  * Sync logic per COMPANY:
  * - Get company from SOURCE
- * - Create company + ALL locations on TARGET
+ * - If company exists on TARGET (by externalId) → update it
+ * - Else create company + ALL locations on TARGET
  * - For each contact:
  *      - upsert customer
  *      - ensure companyContact
@@ -1157,12 +1728,75 @@ async function syncSingleCompany(companyIdOrGid) {
             : "Bronze";
     console.log(`🏷 Tier for company: ${tier}`);
 
-    // 2) Create company + all locations on TARGET
-    const {
-      companyId: targetCompanyId,
-      sourceLocationIdToTargetLocationId,
-      roleNameToTargetRoleId,
-    } = await createCompanyOnTargetFromSource(sourceCompany, orderCount2025);
+    // 2) On TARGET, see if this company already exists by externalId
+    let targetCompanyId;
+    let sourceLocationIdToTargetLocationId = new Map();
+    let roleNameToTargetRoleId = {};
+
+    const externalIdKey = sourceCompany.externalId || sourceCompany.id;
+    console.log("--------",sourceCompany.externalId,"--------",sourceCompany.id);
+
+    try {
+      const existingCompanyData = await graphqlRequest(
+        TARGET_GQL,
+        TARGET_ACCESS_TOKEN,
+        QUERY_TARGET_COMPANY_BY_EXTERNAL_ID,
+        { q: `external_id:"${externalIdKey}"` },
+        "CompaniesByExternalId(TARGET)"
+      );
+
+      const existingCompany =
+        existingCompanyData?.companies?.edges?.[0]?.node;
+
+      if (existingCompany ) {
+        targetCompanyId = existingCompany.id;
+        console.log(
+          `🏢 Company already exists on TARGET: ${existingCompany.name} (${targetCompanyId})`
+        );
+
+        // Update company basic fields
+        await updateCompanyOnTargetFromSource(sourceCompany, targetCompanyId);
+
+        // Build role map from existing company
+        roleNameToTargetRoleId = {};
+        (existingCompany.contactRoles?.edges || []).forEach((r) => {
+          if (r.node?.name && r.node?.id) {
+            roleNameToTargetRoleId[r.node.name] = r.node.id;
+          }
+        });
+
+        // Build location map by matching names
+        sourceLocationIdToTargetLocationId = new Map();
+        const srcLocations = sourceCompany.locations?.edges?.map((e) => e.node) || [];
+        const tgtLocations = existingCompany.locations?.edges?.map((e) => e.node) || [];
+
+        for (const srcLoc of srcLocations) {
+          const match = tgtLocations.find((t) => t.name === srcLoc.name);
+          if (match) {
+            sourceLocationIdToTargetLocationId.set(srcLoc.id, match.id);
+            console.log(
+              `🏬 (existing) Location mapped by name: ${srcLoc.name} (${srcLoc.id}) → ${match.id}`
+            );
+          }
+        }
+      } else {
+        // No existing company found → create new
+        ({
+          companyId: targetCompanyId,
+          sourceLocationIdToTargetLocationId,
+          roleNameToTargetRoleId,
+        } = await createCompanyOnTargetFromSource(sourceCompany, orderCount2025));
+      }
+    } catch (lookupError) {
+      console.error(
+        `⚠️ Failed checking company existence on TARGET, creating new: ${lookupError.message}`
+      );
+      ({
+        companyId: targetCompanyId,
+        sourceLocationIdToTargetLocationId,
+        roleNameToTargetRoleId,
+      } = await createCompanyOnTargetFromSource(sourceCompany, orderCount2025));
+    }
 
     // 3) For each contact, sync customer + contact + roles (+ orders later)
     const contacts = sourceCompany.contacts?.edges || [];
