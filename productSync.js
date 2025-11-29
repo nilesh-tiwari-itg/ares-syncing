@@ -68,242 +68,266 @@ async function graphqlRequest(endpoint, token, query, variables = {}, label = ""
 
 /* ============================================
    SOURCE PRODUCT QUERY
+   (note: catalog __typename added for pub mapping)
 ============================================ */
 const SOURCE_PRODUCTS_QUERY = `
-  query listProducts($cursor: String, $pageSize: Int!) {
-    products(first: $pageSize, after: $cursor) {
-      edges {
-        cursor
-        node {
-          id
-          title
-          handle
-          descriptionHtml
-          createdAt
-          isGiftCard
-          media(first: 250) {
-            nodes {
-              alt
+ query listProducts($cursor: String, $pageSize: Int!) {
+  products(first: $pageSize, after: $cursor) {
+    edges {
+      cursor
+      node {
+        id
+        title
+        handle
+        descriptionHtml
+        createdAt
+        isGiftCard
+        media(first: 250) {
+          nodes {
+            alt
+            id
+            ... on MediaImage {
               id
-              ... on MediaImage {
-                id
+              alt
+              fileStatus
+              createdAt
+              originalSource {
+                url
+                fileSize
+              }
+              mimeType
+              mediaContentType
+              status
+            }
+            ... on Video {
+              id
+              alt
+              filename
+              fileStatus
+              status
+            }
+          }
+        }
+        metafields(first: 250) {
+          nodes {
+            id
+            jsonValue
+            key
+            ownerType
+            value
+            type
+            namespace
+          }
+        }
+        options(first: 250) {
+          id
+          name
+          values
+          position
+          optionValues {
+            hasVariants
+            id
+            linkedMetafieldValue
+            name
+          }
+        }
+        productType
+        priceRangeV2 {
+          maxVariantPrice {
+            amount
+            currencyCode
+          }
+          minVariantPrice {
+            amount
+            currencyCode
+          }
+        }
+        publishedAt
+        status
+        tags
+        totalInventory
+        vendor
+        templateSuffix
+        seo {
+          description
+          title
+        }
+        updatedAt
+        variants(first: 250) {
+          nodes {
+            barcode
+            availableForSale
+            compareAtPrice
+            id
+            createdAt
+            displayName
+            media(first: 250) {
+              nodes {
                 alt
-                fileStatus
-                createdAt
-                originalSource {
-                  url
-                  fileSize
-                }
-                mimeType
+                id
                 mediaContentType
                 status
-              }
-              ... on Video {
-                id
-                alt
-                filename
-                fileStatus
-                status
-              }
-            }
-          }
-          metafields(first: 250) {
-            nodes {
-              id
-              jsonValue
-              key
-              ownerType
-              value
-              type
-              namespace
-            }
-          }
-          options(first: 250) {
-            id
-            name
-            values
-            position
-            optionValues {
-              hasVariants
-              id
-              linkedMetafieldValue
-              name
-            }
-          }
-          productType
-          priceRangeV2 {
-            maxVariantPrice {
-              amount
-              currencyCode
-            }
-            minVariantPrice {
-              amount
-              currencyCode
-            }
-          }
-          publishedAt
-          status
-          tags
-          totalInventory
-          vendor
-          templateSuffix
-          seo {
-            description
-            title
-          }
-          updatedAt
-          variants(first: 250) {
-            nodes {
-              barcode
-              availableForSale
-              compareAtPrice
-              id
-              createdAt
-              displayName
-              media(first: 250) {
-                nodes {
+                ... on ExternalVideo {
+                  id
                   alt
+                  createdAt
+                  embedUrl
+                  host
+                  fileStatus
+                }
+                ... on MediaImage {
                   id
+                  alt
+                  createdAt
+                  fileStatus
                   mediaContentType
+                  mimeType
+                  originalSource {
+                    fileSize
+                    url
+                  }
                   status
-                  ... on ExternalVideo {
-                    id
-                    alt
-                    createdAt
-                    embedUrl
-                    host
-                    fileStatus
-                  }
-                  ... on MediaImage {
-                    id
-                    alt
-                    createdAt
-                    fileStatus
-                    mediaContentType
-                    mimeType
-                    originalSource {
-                      fileSize
-                      url
-                    }
-                    status
-                  }
-                  ... on Video {
-                    id
-                    alt
-                    createdAt
-                    fileStatus
-                    filename
-                    duration
-                    sources {
-                      fileSize
-                      format
-                      height
-                      mimeType
-                      url
-                      width
-                    }
-                    status
-                    updatedAt
-                  }
                 }
-              }
-              metafields(first: 250) {
-                nodes {
-                  key
+                ... on Video {
                   id
-                  jsonValue
-                  ownerType
-                  type
-                  value
-                  namespace
+                  alt
+                  createdAt
+                  fileStatus
+                  filename
+                  duration
+                  sources {
+                    fileSize
+                    format
+                    height
+                    mimeType
+                    url
+                    width
+                  }
+                  status
+                  updatedAt
                 }
               }
-              price
-              sku
-              taxable
-              title
-              unitPriceMeasurement {
-                measuredType
-                quantityUnit
-                quantityValue
-                referenceUnit
-                referenceValue
+            }
+            metafields(first: 250) {
+              nodes {
+                key
+                id
+                jsonValue
+                ownerType
+                type
+                value
+                namespace
               }
-              unitPrice {
+            }
+            price
+            sku
+            taxable
+            title
+            unitPriceMeasurement {
+              measuredType
+              quantityUnit
+              quantityValue
+              referenceUnit
+              referenceValue
+            }
+            unitPrice {
+              amount
+              currencyCode
+            }
+            selectedOptions {
+              name
+              value
+            }
+            position
+            inventoryItem {
+              countryCodeOfOrigin
+              createdAt
+              id
+              harmonizedSystemCode
+              sku
+              unitCost {
                 amount
                 currencyCode
               }
-              selectedOptions {
-                name
-                value
-              }
-              position
-            }
-          }
-          category {
-            id
-            fullName
-            name
-            level
-            isRoot
-            isLeaf
-            isArchived
-            childrenIds
-            ancestorIds
-            parentId
-          }
-          resourcePublications(first: 250) {
-            nodes {
-              isPublished
-              publishDate
-              publication {
+              measurement {
                 id
-                catalog {
+                weight {
+                  unit
+                  value
+                }
+              }
+              tracked
+            }
+            inventoryQuantity
+            inventoryPolicy
+            legacyResourceId
+          }
+        }
+        category {
+          id
+          fullName
+          name
+          level
+          isRoot
+          isLeaf
+          isArchived
+          childrenIds
+          ancestorIds
+          parentId
+        }
+        resourcePublications(first: 250) {
+          nodes {
+            isPublished
+            publishDate
+            publication {
+              id
+              catalog {
+                __typename
+                id
+                title
+                status
+                operations {
+                  id
+                  status
+                }
+                ... on AppCatalog {
+                  id
+                  apps(first: 250) {
+                    nodes {
+                      id
+                      title
+                      shopifyDeveloped
+                      published
+                      handle
+                      description
+                      developerName
+                      embedded
+                    }
+                  }
+                }
+                ... on CompanyLocationCatalog {
+                  id
+                  status
+                  title
+                }
+                ... on MarketCatalog {
                   id
                   title
                   status
-                  operations {
-                    id
-                    status
-                  }
-                  ... on AppCatalog {
-                    id
-                    apps(first: 250) {
-                      nodes {
-                        id
-                        title
-                        shopifyDeveloped
-                        published
-                        handle
-                        description
-                        developerName
-                        embedded
-                      }
-                    }
-                  }
-                  ... on CompanyLocationCatalog {
-                    id
-                    status
-                    title
-                  }
-                  ... on MarketCatalog {
-                    id
-                    title
-                    status
-                  }
                 }
-                autoPublish
               }
+              autoPublish
             }
           }
         }
       }
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
     }
   }
+}
 `;
 
 /* ============================================
@@ -334,7 +358,26 @@ mutation createProductAsynchronous($productSet: ProductSetInput!, $synchronous: 
 `;
 
 /* ============================================
-   COLLECTIONS FROM TARGET STORE
+   PUBLISH MUTATION
+============================================ */
+const PUBLISHABLE_PUBLISH_MUTATION = `
+mutation publishProductToPublications($id: ID!, $input: [PublicationInput!]!) {
+  publishablePublish(id: $id, input: $input) {
+    publishable {
+      ... on Product {
+        id
+      }
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}
+`;
+
+/* ============================================
+   COLLECTIONS FROM TARGET STORE (optional)
 ============================================ */
 async function fetchTargetCollectionsMap() {
   const QUERY = `
@@ -369,6 +412,81 @@ async function fetchTargetCollectionsMap() {
   }
 
   return map;
+}
+
+/* ============================================
+   PUBLICATIONS FROM TARGET STORE
+   key = `${catalog.__typename}:${catalog.title}` → publicationId
+============================================ */
+async function fetchTargetPublicationsMap() {
+  const QUERY = `
+    query listPublications($cursor: String) {
+      publications(first: 250, after: $cursor) {
+        edges {
+          cursor
+          node {
+            id
+            catalog {
+              __typename
+              id
+              title
+            }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  `;
+
+  let cursor = null;
+  const map = {};
+
+  while (true) {
+    const data = await graphqlRequest(
+      TARGET_GQL,
+      TARGET_ACCESS_TOKEN,
+      QUERY,
+      { cursor },
+      "fetch target publications"
+    );
+
+    const edges = data.publications.edges;
+    for (const edge of edges) {
+      const pubId = edge.node.id;
+      const cat = edge.node.catalog;
+      if (!cat || !cat.__typename || !cat.title) continue;
+      const key = `${cat.__typename}:${cat.title}`;
+      if (!map[key]) {
+        map[key] = pubId;
+      }
+    }
+
+    if (!data.publications.pageInfo.hasNextPage) break;
+    cursor = data.publications.pageInfo.endCursor;
+  }
+
+  return map;
+}
+
+/* ============================================
+   BUILD PUBLICATION INPUTS FROM SOURCE PRODUCT
+   (same sales channels as source, if they exist on target)
+============================================ */
+function buildPublicationInputsFromSourceProduct(product, targetPublicationMap) {
+  const nodes = product.resourcePublications?.nodes || [];
+  const targetIds = new Set();
+
+  for (const rp of nodes) {
+    if (!rp.isPublished) continue;
+    const cat = rp.publication?.catalog;
+    if (!cat || !cat.__typename || !cat.title) continue;
+
+    const key = `${cat.__typename}:${cat.title}`;
+    const targetPubId = targetPublicationMap[key];
+    if (targetPubId) targetIds.add(targetPubId);
+  }
+
+  return Array.from(targetIds).map((id) => ({ publicationId: id }));
 }
 
 /* ============================================
@@ -439,7 +557,42 @@ function transformProduct(product, collectionsMap) {
           compareAtPrice: compareAt || undefined,
         };
 
-        // variant metafields — filter out harmonized_system_code (not allowed on ProductVariant)
+        // inventory policy
+        if (v.inventoryPolicy) {
+          variantInput.inventoryPolicy = v.inventoryPolicy;
+        }
+
+        // inventory item (limited; weight updates via ProductSet are not supported)
+        if (v.inventoryItem) {
+          const inv = v.inventoryItem;
+          const inventoryItemInput = {};
+
+          if (inv.unitCost?.amount != null && inv.unitCost.amount !== "") {
+            inventoryItemInput.cost = String(inv.unitCost.amount);
+          }
+
+          if (inv.countryCodeOfOrigin) {
+            inventoryItemInput.countryCodeOfOrigin = inv.countryCodeOfOrigin;
+          }
+
+          if (inv.harmonizedSystemCode) {
+            inventoryItemInput.harmonizedSystemCode = inv.harmonizedSystemCode;
+          }
+
+          if (typeof inv.tracked === "boolean") {
+            inventoryItemInput.tracked = inv.tracked;
+          }
+
+          if (inv.sku || v.sku) {
+            inventoryItemInput.sku = inv.sku || v.sku;
+          }
+
+          if (Object.keys(inventoryItemInput).length > 0) {
+            variantInput.inventoryItem = inventoryItemInput;
+          }
+        }
+
+        // variant metafields — filter out harmonized_system_code (must live on inventory item now)
         const vm =
           v.metafields?.nodes
             ?.filter(
@@ -472,13 +625,9 @@ function transformProduct(product, collectionsMap) {
       })
       .filter(Boolean) || [];
 
-  // collections mapping (best-effort; may be empty if no matching handles)
-  const sourceHandles =
-    product.resourcePublications?.nodes
-      ?.map((n) => n.publication?.catalog?.handle)
-      ?.filter(Boolean) || [];
-
-  const targetCollectionIds = sourceHandles.map((h) => collectionsMap[h]).filter(Boolean);
+  // collections mapping (best-effort; currently no source → collection handle mapping,
+  // collectionsMap is there if you later decide to drive membership by handle)
+  const targetCollectionIds = []; // leaving empty for now; adjust if you add collection logic
 
   // final ProductSetInput
   const input = {
@@ -494,6 +643,8 @@ function transformProduct(product, collectionsMap) {
     metafields,
     files,
     variants,
+    // 🔹 category mapping (same as source)
+    category: product.category?.id || undefined,
   };
 
   // required when variants present (and harmless when not)
@@ -522,6 +673,7 @@ async function migrateProducts() {
   console.log("🚀 Starting Product Migration B2C → B2B");
 
   const collectionsMap = await fetchTargetCollectionsMap();
+  const targetPublicationMap = await fetchTargetPublicationsMap();
 
   let cursor = null;
   let count = 0;
@@ -556,10 +708,44 @@ async function migrateProducts() {
         );
 
         if (result.productSet.userErrors?.length) {
-          console.error("❌ Shopify UserErrors:", result.productSet.userErrors);
-        } else {
-          const id = result.productSet.product?.id || "(no id returned)";
-          console.log(`✅ Created/Updated → ${id}`);
+          console.error("❌ Shopify UserErrors (productSet):", result.productSet.userErrors);
+          continue;
+        }
+
+        const newProductId = result.productSet.product?.id;
+        console.log(`✅ Created/Updated → ${newProductId || "(no id returned)"}`);
+
+        // 🔹 Publish on same sales channels as source
+        if (newProductId) {
+            console.log("📢 Publishing...");
+          const publicationInputs = buildPublicationInputsFromSourceProduct(
+            product,
+            targetPublicationMap
+          );
+
+          if (publicationInputs.length) {
+            console.log("   Publishing...");
+            const publishResult = await graphqlRequest(
+              TARGET_GQL,
+              TARGET_ACCESS_TOKEN,
+              PUBLISHABLE_PUBLISH_MUTATION,
+              { id: newProductId, input: publicationInputs },
+              `publish ${product.handle}`
+            );
+
+            if (publishResult.publishablePublish.userErrors?.length) {
+              console.error(
+                "⚠️ Shopify UserErrors (publishablePublish):",
+                publishResult.publishablePublish.userErrors
+              );
+            } else {
+              console.log(
+                `📢 Published to ${publicationInputs.length} publication(s) (same channels as source where possible)`
+              );
+            }
+          } else {
+            console.log("ℹ️ No matching publications found on target for this product.");
+          }
         }
       } catch (err) {
         console.error(`❌ Failed: ${err.message}`);
