@@ -68,7 +68,7 @@ async function graphqlRequest(endpoint, token, query, variables = {}, label = ""
 
 /* ============================================
    SOURCE PRODUCT QUERY
-   (note: catalog __typename added for pub mapping)
+   (catalog + app info used for pub mapping)
 ============================================ */
 const SOURCE_PRODUCTS_QUERY = `
  query listProducts($cursor: String, $pageSize: Int!) {
@@ -292,29 +292,18 @@ const SOURCE_PRODUCTS_QUERY = `
                 }
                 ... on AppCatalog {
                   id
-                  apps(first: 250) {
-                    nodes {
-                      id
-                      title
-                      shopifyDeveloped
-                      published
-                      handle
-                      description
-                      developerName
-                      embedded
-                    }
+                  title
+                  status
+                  publication {
+                    id
+                    name
                   }
                 }
-                ... on CompanyLocationCatalog {
-                  id
-                  status
-                  title
-                }
-                ... on MarketCatalog {
-                  id
-                  title
-                  status
-                }
+              }
+              app {
+                id
+                title
+                handle
               }
               autoPublish
             }
@@ -416,53 +405,62 @@ async function fetchTargetCollectionsMap() {
 
 /* ============================================
    PUBLICATIONS FROM TARGET STORE
-   key = `${catalog.__typename}:${catalog.title}` → publicationId
+   Map keys: app.handle (primary), app.title (fallback)
 ============================================ */
 async function fetchTargetPublicationsMap() {
   const QUERY = `
-    query listPublications($cursor: String) {
-      publications(first: 250, after: $cursor) {
-        edges {
-          cursor
-          node {
+    query MyQuery {
+      publications(first: 250) {
+        nodes {
+          id
+          catalog {
             id
-            catalog {
-              __typename
+            title
+            status
+            ... on AppCatalog {
               id
               title
+              status
+              publication {
+                id
+                name
+              }
             }
           }
+          app {
+            id
+            title
+            handle
+          }
         }
-        pageInfo { hasNextPage endCursor }
       }
     }
   `;
 
-  let cursor = null;
+  const data = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    QUERY,
+    {},
+    "fetch target publications"
+  );
+
+  const nodes = data.publications?.nodes || [];
   const map = {};
 
-  while (true) {
-    const data = await graphqlRequest(
-      TARGET_GQL,
-      TARGET_ACCESS_TOKEN,
-      QUERY,
-      { cursor },
-      "fetch target publications"
-    );
+  for (const node of nodes) {
+    const app = node.app;
+    const cat = node.catalog;
 
-    const edges = data.publications.edges;
-    for (const edge of edges) {
-      const pubId = edge.node.id;
-      const cat = edge.node.catalog;
-      if (!cat || !cat.__typename || !cat.title) continue;
-      const key = `${cat.__typename}:${cat.title}`;
-      if (!map[key]) {
-        map[key] = pubId;
-      }
+    if (app?.handle) {
+      map[app.handle] = node.id;
     }
-
-    if (!data.publications.pageInfo.hasNextPage) break;
-    cursor = data.publications.pageInfo.endCursor;
+    if (app?.title && !map[app.title]) {
+      map[app.title] = node.id;
+    }
+    if (cat?.title && !map[cat.title]) {
+      map[cat.title] = node.id;
+    }
   }
 
   return map;
@@ -470,7 +468,6 @@ async function fetchTargetPublicationsMap() {
 
 /* ============================================
    BUILD PUBLICATION INPUTS FROM SOURCE PRODUCT
-   (same sales channels as source, if they exist on target)
 ============================================ */
 function buildPublicationInputsFromSourceProduct(product, targetPublicationMap) {
   const nodes = product.resourcePublications?.nodes || [];
@@ -478,12 +475,25 @@ function buildPublicationInputsFromSourceProduct(product, targetPublicationMap) 
 
   for (const rp of nodes) {
     if (!rp.isPublished) continue;
-    const cat = rp.publication?.catalog;
-    if (!cat || !cat.__typename || !cat.title) continue;
 
-    const key = `${cat.__typename}:${cat.title}`;
-    const targetPubId = targetPublicationMap[key];
-    if (targetPubId) targetIds.add(targetPubId);
+    const pub = rp.publication;
+    if (!pub) continue;
+
+    const app = pub.app;
+    const cat = pub.catalog;
+
+    const keysToTry = [];
+
+    if (app?.handle) keysToTry.push(app.handle);
+    if (app?.title) keysToTry.push(app.title);
+    if (cat?.title) keysToTry.push(cat.title);
+
+    for (const key of keysToTry) {
+      const targetPubId = targetPublicationMap[key];
+      if (targetPubId) {
+        targetIds.add(targetPubId);
+      }
+    }
   }
 
   return Array.from(targetIds).map((id) => ({ publicationId: id }));
@@ -514,7 +524,7 @@ function transformProduct(product, collectionsMap) {
         alt: img.alt || product.title,
       })) || [];
 
-  // product options (required when variants are present in ProductSetInput)
+  // product options
   const productOptions =
     product.options?.map((opt, idx) => ({
       name: opt.name,
@@ -528,7 +538,6 @@ function transformProduct(product, collectionsMap) {
   const variants =
     product.variants?.nodes
       ?.map((v, idx) => {
-        // ProductSet requires optionValues for variants if options exist
         if (!v.selectedOptions?.length) return null;
 
         const optionValues = v.selectedOptions.map((opt) => ({
@@ -552,7 +561,6 @@ function transformProduct(product, collectionsMap) {
           barcode: v.barcode || undefined,
           taxable: v.taxable,
           optionValues,
-          // Money scalar is just a string, no currencyCode object
           price: vPrice || undefined,
           compareAtPrice: compareAt || undefined,
         };
@@ -562,7 +570,7 @@ function transformProduct(product, collectionsMap) {
           variantInput.inventoryPolicy = v.inventoryPolicy;
         }
 
-        // inventory item (limited; weight updates via ProductSet are not supported)
+        // inventory item (incl. weight now)
         if (v.inventoryItem) {
           const inv = v.inventoryItem;
           const inventoryItemInput = {};
@@ -587,12 +595,26 @@ function transformProduct(product, collectionsMap) {
             inventoryItemInput.sku = inv.sku || v.sku;
           }
 
+          // 🔹 weight mapping via measurement.weight
+          if (
+            inv.measurement?.weight &&
+            inv.measurement.weight.value != null &&
+            inv.measurement.weight.unit
+          ) {
+            inventoryItemInput.measurement = {
+              weight: {
+                value: inv.measurement.weight.value,
+                unit: inv.measurement.weight.unit,
+              },
+            };
+          }
+
           if (Object.keys(inventoryItemInput).length > 0) {
             variantInput.inventoryItem = inventoryItemInput;
           }
         }
 
-        // variant metafields — filter out harmonized_system_code (must live on inventory item now)
+        // variant metafields — filter out harmonized_system_code
         const vm =
           v.metafields?.nodes
             ?.filter(
@@ -611,7 +633,7 @@ function transformProduct(product, collectionsMap) {
 
         if (vm.length) variantInput.metafields = vm;
 
-        // unit price measurement (optional)
+        // unit price measurement
         if (v.unitPriceMeasurement?.quantityUnit) {
           variantInput.unitPriceMeasurement = {
             quantityUnit: v.unitPriceMeasurement.quantityUnit,
@@ -625,11 +647,8 @@ function transformProduct(product, collectionsMap) {
       })
       .filter(Boolean) || [];
 
-  // collections mapping (best-effort; currently no source → collection handle mapping,
-  // collectionsMap is there if you later decide to drive membership by handle)
-  const targetCollectionIds = []; // leaving empty for now; adjust if you add collection logic
+  const targetCollectionIds = [];
 
-  // final ProductSetInput
   const input = {
     title: product.title,
     handle: product.handle,
@@ -643,11 +662,9 @@ function transformProduct(product, collectionsMap) {
     metafields,
     files,
     variants,
-    // 🔹 category mapping (same as source)
     category: product.category?.id || undefined,
   };
 
-  // required when variants present (and harmless when not)
   if (productOptions.length) {
     input.productOptions = productOptions;
   }
@@ -715,16 +732,14 @@ async function migrateProducts() {
         const newProductId = result.productSet.product?.id;
         console.log(`✅ Created/Updated → ${newProductId || "(no id returned)"}`);
 
-        // 🔹 Publish on same sales channels as source
         if (newProductId) {
-            console.log("📢 Publishing...");
           const publicationInputs = buildPublicationInputsFromSourceProduct(
             product,
             targetPublicationMap
           );
 
           if (publicationInputs.length) {
-            console.log("   Publishing...");
+            console.log("   Publishing to matched publications...");
             const publishResult = await graphqlRequest(
               TARGET_GQL,
               TARGET_ACCESS_TOKEN,
