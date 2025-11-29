@@ -235,6 +235,7 @@ const QUERY_COMPANY_ORDERS_CONNECTION = `
 async function fetchCompanyOrdersCount2025(companyGid) {
   let count = 0;
   let cursor = null;
+  const currentYear = new Date().getFullYear();
 
   while (true) {
     const data = await graphqlRequest(
@@ -251,8 +252,7 @@ async function fetchCompanyOrdersCount2025(companyGid) {
     for (const edge of ordersConn.edges) {
       const order = edge.node;
       const year = new Date(order.createdAt).getFullYear();
-
-      if (year !== 2025) continue;
+      if (year !== currentYear) continue;
 
       // ---- Qualification Logic ----
       const isFulfilled = order.displayFulfillmentStatus === "FULFILLED";
@@ -978,10 +978,15 @@ async function updateCustomerSmsConsentOnTargetFromSource(sourceCustomer, target
     return;
   }
 
+  // Normalize NOT_SUBSCRIBED → UNSUBSCRIBED (API doesn't accept NOT_SUBSCRIBED as input)
+  const state = smsConsent.marketingState === "NOT_SUBSCRIBED"
+    ? "UNSUBSCRIBED"
+    : smsConsent.marketingState;
+
   const input = {
     customerId: targetCustomer.id,
     smsMarketingConsent: {
-      marketingState: smsConsent.marketingState,
+      marketingState: state,
     },
   };
 
@@ -1734,7 +1739,7 @@ async function syncSingleCompany(companyIdOrGid) {
     let roleNameToTargetRoleId = {};
 
     const externalIdKey = sourceCompany.externalId || sourceCompany.id;
-    console.log("--------",sourceCompany.externalId,"--------",sourceCompany.id);
+    console.log("--------", sourceCompany.externalId, "--------", sourceCompany.id);
 
     try {
       const existingCompanyData = await graphqlRequest(
@@ -1748,7 +1753,7 @@ async function syncSingleCompany(companyIdOrGid) {
       const existingCompany =
         existingCompanyData?.companies?.edges?.[0]?.node;
 
-      if (existingCompany ) {
+      if (existingCompany) {
         targetCompanyId = existingCompany.id;
         console.log(
           `🏢 Company already exists on TARGET: ${existingCompany.name} (${targetCompanyId})`

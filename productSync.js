@@ -1,0 +1,582 @@
+#!/usr/bin/env node
+import dotenv from "dotenv";
+dotenv.config();
+
+/* ============================================
+   CONFIG
+============================================ */
+const API_VERSION = process.env.API_VERSION || "2025-10";
+
+const SOURCE_SHOP = process.env.SOURCE_SHOP;
+const SOURCE_ACCESS_TOKEN = process.env.SOURCE_ACCESS_TOKEN;
+
+const TARGET_SHOP = process.env.TARGET_SHOP;
+const TARGET_ACCESS_TOKEN = process.env.TARGET_ACCESS_TOKEN;
+
+const PAGE_SIZE = parseInt(process.env.PAGE_SIZE || "1", 10);
+const SYNCHRONOUS = true;
+
+if (!SOURCE_SHOP || !SOURCE_ACCESS_TOKEN || !TARGET_SHOP || !TARGET_ACCESS_TOKEN) {
+  console.error("❌ Missing env vars: SOURCE_SHOP, SOURCE_ACCESS_TOKEN, TARGET_SHOP, TARGET_ACCESS_TOKEN");
+  process.exit(1);
+}
+
+const SOURCE_GQL = `https://${SOURCE_SHOP}/admin/api/${API_VERSION}/graphql.json`;
+const TARGET_GQL = `https://${TARGET_SHOP}/admin/api/${API_VERSION}/graphql.json`;
+
+/* ============================================
+   GRAPHQL HELPER
+============================================ */
+async function graphqlRequest(endpoint, token, query, variables = {}, label = "") {
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": token,
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+
+    const text = await res.text();
+    let json;
+
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch (_) {
+      console.error(`❌ Invalid JSON for ${label}:`, text);
+      throw new Error("Invalid JSON");
+    }
+
+    if (!res.ok) {
+      console.error(`❌ HTTP ${res.status} on ${label}`);
+      console.error(text);
+      throw new Error(`HTTP Error ${res.status}`);
+    }
+
+    if (json.errors?.length) {
+      console.error(`❌ GraphQL Errors (${label}):`, JSON.stringify(json.errors, null, 2));
+      throw new Error("GraphQL error");
+    }
+
+    return json.data;
+  } catch (err) {
+    console.error(`❌ Request failed (${label}): ${err.message}`);
+    throw err;
+  }
+}
+
+/* ============================================
+   SOURCE PRODUCT QUERY
+============================================ */
+const SOURCE_PRODUCTS_QUERY = `
+  query listProducts($cursor: String, $pageSize: Int!) {
+    products(first: $pageSize, after: $cursor) {
+      edges {
+        cursor
+        node {
+          id
+          title
+          handle
+          descriptionHtml
+          createdAt
+          isGiftCard
+          media(first: 250) {
+            nodes {
+              alt
+              id
+              ... on MediaImage {
+                id
+                alt
+                fileStatus
+                createdAt
+                originalSource {
+                  url
+                  fileSize
+                }
+                mimeType
+                mediaContentType
+                status
+              }
+              ... on Video {
+                id
+                alt
+                filename
+                fileStatus
+                status
+              }
+            }
+          }
+          metafields(first: 250) {
+            nodes {
+              id
+              jsonValue
+              key
+              ownerType
+              value
+              type
+              namespace
+            }
+          }
+          options(first: 250) {
+            id
+            name
+            values
+            position
+            optionValues {
+              hasVariants
+              id
+              linkedMetafieldValue
+              name
+            }
+          }
+          productType
+          priceRangeV2 {
+            maxVariantPrice {
+              amount
+              currencyCode
+            }
+            minVariantPrice {
+              amount
+              currencyCode
+            }
+          }
+          publishedAt
+          status
+          tags
+          totalInventory
+          vendor
+          templateSuffix
+          seo {
+            description
+            title
+          }
+          updatedAt
+          variants(first: 250) {
+            nodes {
+              barcode
+              availableForSale
+              compareAtPrice
+              id
+              createdAt
+              displayName
+              media(first: 250) {
+                nodes {
+                  alt
+                  id
+                  mediaContentType
+                  status
+                  ... on ExternalVideo {
+                    id
+                    alt
+                    createdAt
+                    embedUrl
+                    host
+                    fileStatus
+                  }
+                  ... on MediaImage {
+                    id
+                    alt
+                    createdAt
+                    fileStatus
+                    mediaContentType
+                    mimeType
+                    originalSource {
+                      fileSize
+                      url
+                    }
+                    status
+                  }
+                  ... on Video {
+                    id
+                    alt
+                    createdAt
+                    fileStatus
+                    filename
+                    duration
+                    sources {
+                      fileSize
+                      format
+                      height
+                      mimeType
+                      url
+                      width
+                    }
+                    status
+                    updatedAt
+                  }
+                }
+              }
+              metafields(first: 250) {
+                nodes {
+                  key
+                  id
+                  jsonValue
+                  ownerType
+                  type
+                  value
+                  namespace
+                }
+              }
+              price
+              sku
+              taxable
+              title
+              unitPriceMeasurement {
+                measuredType
+                quantityUnit
+                quantityValue
+                referenceUnit
+                referenceValue
+              }
+              unitPrice {
+                amount
+                currencyCode
+              }
+              selectedOptions {
+                name
+                value
+              }
+              position
+            }
+          }
+          category {
+            id
+            fullName
+            name
+            level
+            isRoot
+            isLeaf
+            isArchived
+            childrenIds
+            ancestorIds
+            parentId
+          }
+          resourcePublications(first: 250) {
+            nodes {
+              isPublished
+              publishDate
+              publication {
+                id
+                catalog {
+                  id
+                  title
+                  status
+                  operations {
+                    id
+                    status
+                  }
+                  ... on AppCatalog {
+                    id
+                    apps(first: 250) {
+                      nodes {
+                        id
+                        title
+                        shopifyDeveloped
+                        published
+                        handle
+                        description
+                        developerName
+                        embedded
+                      }
+                    }
+                  }
+                  ... on CompanyLocationCatalog {
+                    id
+                    status
+                    title
+                  }
+                  ... on MarketCatalog {
+                    id
+                    title
+                    status
+                  }
+                }
+                autoPublish
+              }
+            }
+          }
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
+/* ============================================
+   PRODUCTSET MUTATION
+============================================ */
+const PRODUCT_SET_MUTATION = `
+mutation createProductAsynchronous($productSet: ProductSetInput!, $synchronous: Boolean!) {
+  productSet(synchronous: $synchronous, input: $productSet) {
+    product {
+      id
+    }
+    productSetOperation {
+      id
+      status
+      userErrors {
+        code
+        field
+        message
+      }
+    }
+    userErrors {
+      code
+      field
+      message
+    }
+  }
+}
+`;
+
+/* ============================================
+   COLLECTIONS FROM TARGET STORE
+============================================ */
+async function fetchTargetCollectionsMap() {
+  const QUERY = `
+    query listCollections($cursor: String) {
+      collections(first: 250, after: $cursor) {
+        edges {
+          cursor
+          node { id handle }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  `;
+
+  let cursor = null;
+  const map = {};
+
+  while (true) {
+    const data = await graphqlRequest(
+      TARGET_GQL,
+      TARGET_ACCESS_TOKEN,
+      QUERY,
+      { cursor },
+      "fetch target collections"
+    );
+
+    const edges = data.collections.edges;
+    for (const edge of edges) map[edge.node.handle] = edge.node.id;
+
+    if (!data.collections.pageInfo.hasNextPage) break;
+    cursor = data.collections.pageInfo.endCursor;
+  }
+
+  return map;
+}
+
+/* ============================================
+   TRANSFORM PRODUCT → ProductSetInput
+============================================ */
+function transformProduct(product, collectionsMap) {
+  // metafields (product-level)
+  const metafields =
+    product.metafields?.nodes
+      ?.filter((m) => m.namespace && m.key && m.type)
+      .map((m) => ({
+        namespace: m.namespace,
+        key: m.key,
+        type: m.type,
+        value: String(m.value),
+      })) || [];
+
+  // files → images only
+  const files =
+    product.media?.nodes
+      ?.filter((x) => x.mediaContentType === "IMAGE" && x.originalSource?.url)
+      .map((img) => ({
+        contentType: "IMAGE",
+        originalSource: img.originalSource.url,
+        alt: img.alt || product.title,
+      })) || [];
+
+  // product options (required when variants are present in ProductSetInput)
+  const productOptions =
+    product.options?.map((opt, idx) => ({
+      name: opt.name,
+      position: opt.position || idx + 1,
+      values: (opt.values || []).map((val) => ({
+        name: val,
+      })),
+    })) || [];
+
+  // variants
+  const variants =
+    product.variants?.nodes
+      ?.map((v, idx) => {
+        // ProductSet requires optionValues for variants if options exist
+        if (!v.selectedOptions?.length) return null;
+
+        const optionValues = v.selectedOptions.map((opt) => ({
+          optionName: opt.name,
+          name: opt.value,
+        }));
+
+        const vPrice =
+          v.price != null && v.price !== ""
+            ? String(v.price)
+            : product.priceRangeV2?.minVariantPrice?.amount || null;
+
+        const compareAt =
+          v.compareAtPrice != null && v.compareAtPrice !== ""
+            ? String(v.compareAtPrice)
+            : null;
+
+        const variantInput = {
+          position: v.position || idx + 1,
+          sku: v.sku || undefined,
+          barcode: v.barcode || undefined,
+          taxable: v.taxable,
+          optionValues,
+          // Money scalar is just a string, no currencyCode object
+          price: vPrice || undefined,
+          compareAtPrice: compareAt || undefined,
+        };
+
+        // variant metafields — filter out harmonized_system_code (not allowed on ProductVariant)
+        const vm =
+          v.metafields?.nodes
+            ?.filter(
+              (m) =>
+                m.namespace &&
+                m.key &&
+                m.type &&
+                m.key !== "harmonized_system_code"
+            )
+            .map((m) => ({
+              namespace: m.namespace,
+              key: m.key,
+              type: m.type,
+              value: String(m.value),
+            })) || [];
+
+        if (vm.length) variantInput.metafields = vm;
+
+        // unit price measurement (optional)
+        if (v.unitPriceMeasurement?.quantityUnit) {
+          variantInput.unitPriceMeasurement = {
+            quantityUnit: v.unitPriceMeasurement.quantityUnit,
+            quantityValue: v.unitPriceMeasurement.quantityValue,
+            referenceUnit: v.unitPriceMeasurement.referenceUnit,
+            referenceValue: v.unitPriceMeasurement.referenceValue,
+          };
+        }
+
+        return variantInput;
+      })
+      .filter(Boolean) || [];
+
+  // collections mapping (best-effort; may be empty if no matching handles)
+  const sourceHandles =
+    product.resourcePublications?.nodes
+      ?.map((n) => n.publication?.catalog?.handle)
+      ?.filter(Boolean) || [];
+
+  const targetCollectionIds = sourceHandles.map((h) => collectionsMap[h]).filter(Boolean);
+
+  // final ProductSetInput
+  const input = {
+    title: product.title,
+    handle: product.handle,
+    descriptionHtml: product.descriptionHtml,
+    productType: product.productType,
+    vendor: product.vendor,
+    tags: product.tags,
+    status: product.status,
+    templateSuffix: product.templateSuffix || undefined,
+    giftCard: product.isGiftCard,
+    metafields,
+    files,
+    variants,
+  };
+
+  // required when variants present (and harmless when not)
+  if (productOptions.length) {
+    input.productOptions = productOptions;
+  }
+
+  if (targetCollectionIds.length) {
+    input.collections = targetCollectionIds;
+  }
+
+  if (product.seo?.title || product.seo?.description) {
+    input.seo = {
+      title: product.seo?.title || undefined,
+      description: product.seo?.description || undefined,
+    };
+  }
+
+  return input;
+}
+
+/* ============================================
+   MAIN MIGRATION LOOP
+============================================ */
+async function migrateProducts() {
+  console.log("🚀 Starting Product Migration B2C → B2B");
+
+  const collectionsMap = await fetchTargetCollectionsMap();
+
+  let cursor = null;
+  let count = 0;
+
+  while (true) {
+    const data = await graphqlRequest(
+      SOURCE_GQL,
+      SOURCE_ACCESS_TOKEN,
+      SOURCE_PRODUCTS_QUERY,
+      { cursor, pageSize: PAGE_SIZE },
+      "fetch b2c products"
+    );
+
+    const edges = data.products.edges;
+    if (!edges.length) break;
+
+    for (const edge of edges) {
+      const product = edge.node;
+
+      count++;
+      console.log(`\n▶ Migrating product ${count}: ${product.title} (${product.handle})`);
+
+      try {
+        const input = transformProduct(product, collectionsMap);
+
+        const result = await graphqlRequest(
+          TARGET_GQL,
+          TARGET_ACCESS_TOKEN,
+          PRODUCT_SET_MUTATION,
+          { productSet: input, synchronous: SYNCHRONOUS },
+          `productSet ${product.handle}`
+        );
+
+        if (result.productSet.userErrors?.length) {
+          console.error("❌ Shopify UserErrors:", result.productSet.userErrors);
+        } else {
+          const id = result.productSet.product?.id || "(no id returned)";
+          console.log(`✅ Created/Updated → ${id}`);
+        }
+      } catch (err) {
+        console.error(`❌ Failed: ${err.message}`);
+      }
+    }
+
+    if (!data.products.pageInfo.hasNextPage) break;
+    cursor = data.products.pageInfo.endCursor;
+  }
+
+  console.log("\n🎉 Migration Complete");
+}
+
+/* ============================================
+   START
+============================================ */
+migrateProducts().catch((err) => {
+  console.error("🚨 Fatal:", err.message);
+  process.exit(1);
+});
