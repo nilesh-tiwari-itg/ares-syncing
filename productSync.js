@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -68,7 +67,6 @@ async function graphqlRequest(endpoint, token, query, variables = {}, label = ""
 
 /* ============================================
    SOURCE PRODUCT QUERY
-   (catalog + app info used for pub mapping)
 ============================================ */
 const SOURCE_PRODUCTS_QUERY = `
  query listProducts($cursor: String, $pageSize: Int!) {
@@ -257,6 +255,23 @@ const SOURCE_PRODUCTS_QUERY = `
                 }
               }
               tracked
+              inventoryLevels(first: 10) {
+                nodes {
+                  id
+                  location {
+                    id
+                    name
+                    shipsInventory
+                    isActive
+                  }
+                  quantities(names: ["available"]) {
+                    id
+                    name
+                    quantity
+                    updatedAt
+                  }
+                }
+              }
             }
             inventoryQuantity
             inventoryPolicy
@@ -323,7 +338,7 @@ const SOURCE_PRODUCTS_QUERY = `
    PRODUCTSET MUTATION
 ============================================ */
 const PRODUCT_SET_MUTATION = `
-mutation createProductAsynchronous($productSet: ProductSetInput!, $synchronous: Boolean!) {
+mutation createOrUpdateProduct($productSet: ProductSetInput!, $synchronous: Boolean!) {
   productSet(synchronous: $synchronous, input: $productSet) {
     product {
       id
@@ -366,7 +381,31 @@ mutation publishProductToPublications($id: ID!, $input: [PublicationInput!]!) {
 `;
 
 /* ============================================
-   COLLECTIONS FROM TARGET STORE (optional)
+   NEW: LOOKUP PRODUCT BY HANDLE ON TARGET
+============================================ */
+const PRODUCT_BY_HANDLE_QUERY = `
+  query getProductByHandle($handle: String!) {
+    productByHandle(handle: $handle) {
+      id
+      handle
+    }
+  }
+`;
+
+async function findTargetProductByHandle(handle) {
+  const data = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    PRODUCT_BY_HANDLE_QUERY,
+    { handle },
+    "findTargetProductByHandle"
+  );
+
+  return data.productByHandle?.id || null;
+}
+
+/* ============================================
+   COLLECTIONS FROM TARGET STORE
 ============================================ */
 async function fetchTargetCollectionsMap() {
   const QUERY = `
@@ -405,7 +444,6 @@ async function fetchTargetCollectionsMap() {
 
 /* ============================================
    PUBLICATIONS FROM TARGET STORE
-   Map keys: app.handle (primary), app.title (fallback)
 ============================================ */
 async function fetchTargetPublicationsMap() {
   const QUERY = `
@@ -467,6 +505,79 @@ async function fetchTargetPublicationsMap() {
 }
 
 /* ============================================
+   FETCH SOURCE LOCATIONS
+============================================ */
+async function fetchSourceLocations() {
+  const QUERY = `
+    query {
+      locations(first: 250) {
+        nodes {
+          id
+          name
+          isActive
+        }
+      }
+    }
+  `;
+
+  const data = await graphqlRequest(
+    SOURCE_GQL,
+    SOURCE_ACCESS_TOKEN,
+    QUERY,
+    {},
+    "fetch source locations"
+  );
+
+  return data.locations?.nodes || [];
+}
+
+/* ============================================
+   TARGET LOCATIONS
+============================================ */
+async function fetchTargetLocations() {
+  const QUERY = `
+    query {
+      locations(first: 250) {
+        nodes {
+          id
+          name
+        }
+      }
+    }
+  `;
+
+  const data = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    QUERY,
+    {},
+    "fetch target locations"
+  );
+
+  return data.locations?.nodes || [];
+}
+
+/* ============================================
+   MAP SOURCE TO TARGET LOCATIONS
+============================================ */
+function mapLocations(sourceLocations, targetLocations) {
+  const map = new Map();
+
+  for (const srcLoc of sourceLocations) {
+    const targetLoc = targetLocations.find(t => t.name === srcLoc.name);
+
+    if (targetLoc) {
+      map.set(srcLoc.id, targetLoc.id);
+      console.log(`   📍 Mapped location: "${srcLoc.name}" → ${targetLoc.id}`);
+    } else {
+      console.warn(`   ⚠️ No matching target location for: "${srcLoc.name}"`);
+    }
+  }
+
+  return map;
+}
+
+/* ============================================
    BUILD PUBLICATION INPUTS FROM SOURCE PRODUCT
 ============================================ */
 function buildPublicationInputsFromSourceProduct(product, targetPublicationMap) {
@@ -500,9 +611,37 @@ function buildPublicationInputsFromSourceProduct(product, targetPublicationMap) 
 }
 
 /* ============================================
+   BUILD INVENTORY QUANTITIES FROM SOURCE VARIANT
+============================================ */
+function buildInventoryQuantitiesForVariant(variant, locationMap) {
+  const inventoryQuantities = [];
+  const inventoryLevels = variant.inventoryItem?.inventoryLevels?.nodes || [];
+
+  for (const level of inventoryLevels) {
+    const sourceLocationId = level.location.id;
+    const targetLocationId = locationMap.get(sourceLocationId);
+
+    if (!targetLocationId) {
+      continue; // Skip unmapped locations
+    }
+
+    const availableQty = level.quantities.find(q => q.name === "available")?.quantity || 0;
+    // const qty = Math.max(0, Number(availableQty));
+    const qty = availableQty;
+    inventoryQuantities.push({
+      locationId: targetLocationId,
+      name: "available",
+      quantity: qty,
+    });
+  }
+
+  return inventoryQuantities;
+}
+
+/* ============================================
    TRANSFORM PRODUCT → ProductSetInput
 ============================================ */
-function transformProduct(product, collectionsMap) {
+function transformProduct(product, collectionsMap, locationMap, existingTargetProductId = null) {
   // metafields (product-level)
   const metafields =
     product.metafields?.nodes
@@ -534,7 +673,7 @@ function transformProduct(product, collectionsMap) {
       })),
     })) || [];
 
-  // variants
+  // variants (with inventory quantities)
   const variants =
     product.variants?.nodes
       ?.map((v, idx) => {
@@ -570,7 +709,7 @@ function transformProduct(product, collectionsMap) {
           variantInput.inventoryPolicy = v.inventoryPolicy;
         }
 
-        // inventory item (incl. weight now)
+        // inventory item (metadata)
         if (v.inventoryItem) {
           const inv = v.inventoryItem;
           const inventoryItemInput = {};
@@ -595,7 +734,7 @@ function transformProduct(product, collectionsMap) {
             inventoryItemInput.sku = inv.sku || v.sku;
           }
 
-          // 🔹 weight mapping via measurement.weight
+          // weight mapping
           if (
             inv.measurement?.weight &&
             inv.measurement.weight.value != null &&
@@ -614,7 +753,13 @@ function transformProduct(product, collectionsMap) {
           }
         }
 
-        // variant metafields — filter out harmonized_system_code
+        // ✨ Build inventory quantities from source inventoryLevels
+        const inventoryQuantities = buildInventoryQuantitiesForVariant(v, locationMap);
+        if (inventoryQuantities.length > 0) {
+          variantInput.inventoryQuantities = inventoryQuantities;
+        }
+
+        // variant metafields
         const vm =
           v.metafields?.nodes
             ?.filter(
@@ -665,6 +810,11 @@ function transformProduct(product, collectionsMap) {
     category: product.category?.id || undefined,
   };
 
+  // 🔁 If product already exists on TARGET, update instead of create
+  if (existingTargetProductId) {
+    input.id = existingTargetProductId;
+  }
+
   if (productOptions.length) {
     input.productOptions = productOptions;
   }
@@ -687,10 +837,25 @@ function transformProduct(product, collectionsMap) {
    MAIN MIGRATION LOOP
 ============================================ */
 async function migrateProducts() {
-  console.log("🚀 Starting Product Migration B2C → B2B");
+  console.log("🚀 Starting Product Migration B2C → B2B (Optimized + Idempotent)");
 
   const collectionsMap = await fetchTargetCollectionsMap();
   const targetPublicationMap = await fetchTargetPublicationsMap();
+
+  // Fetch locations from both stores
+  const sourceLocations = await fetchSourceLocations();
+  const targetLocations = await fetchTargetLocations();
+
+  if (!targetLocations.length) {
+    console.warn("⚠️ No locations found on TARGET store. Inventory will not be assigned.");
+  } else {
+    console.log(`🏬 Source locations: ${sourceLocations.length}`);
+    console.log(`🏬 Target locations: ${targetLocations.length}`);
+  }
+
+  // Create location mapping
+  const locationMap = mapLocations(sourceLocations, targetLocations);
+  console.log(`📍 Mapped ${locationMap.size} locations\n`);
 
   let cursor = null;
   let count = 0;
@@ -714,7 +879,27 @@ async function migrateProducts() {
       console.log(`\n▶ Migrating product ${count}: ${product.title} (${product.handle})`);
 
       try {
-        const input = transformProduct(product, collectionsMap);
+        // 🔎 Check if product already exists on TARGET by handle
+        const existingTargetProductId = await findTargetProductByHandle(product.handle);
+        if (existingTargetProductId) {
+          console.log(`   🔁 Existing product on TARGET → ${existingTargetProductId}`);
+          continue;
+          console.log(`   🔁 Existing product on TARGET → ${existingTargetProductId} (will update)`);
+        } else {
+          console.log(`   🆕 Product not found on TARGET → will create`);
+        }
+
+        // Transform product with inventory included (+ optional id for update)
+        const input = transformProduct(product, collectionsMap, locationMap, existingTargetProductId);
+
+        // Log inventory summary
+        const totalInventoryItems = input.variants.reduce((sum, v) => {
+          return sum + (v.inventoryQuantities?.length || 0);
+        }, 0);
+
+        if (totalInventoryItems > 0) {
+          console.log(`   📦 Setting inventory for ${input.variants.length} variant(s) across ${locationMap.size} mapped location(s)`);
+        }
 
         const result = await graphqlRequest(
           TARGET_GQL,
@@ -725,13 +910,22 @@ async function migrateProducts() {
         );
 
         if (result.productSet.userErrors?.length) {
-          console.error("❌ Shopify UserErrors (productSet):", result.productSet.userErrors);
-          continue;
+          const errs = result.productSet.userErrors;
+          console.error("❌ Shopify UserErrors (productSet):", errs);
+
+          // Just in case, explicitly swallow HANDLE_NOT_UNIQUE if somehow still returned
+          const fatal = errs.filter(e => e.code !== "HANDLE_NOT_UNIQUE");
+          if (fatal.length) {
+            continue;
+          } else {
+            console.log("   ℹ️ HANDLE_NOT_UNIQUE ignored because product is already managed via idempotent logic.");
+          }
         }
 
-        const newProductId = result.productSet.product?.id;
-        console.log(`✅ Created/Updated → ${newProductId || "(no id returned)"}`);
+        const newProductId = result.productSet.product?.id || existingTargetProductId;
+        console.log(`✅ Created → ${newProductId || "(no id returned)"}`);
 
+        // 🔹 Publish on same sales channels as source
         if (newProductId) {
           const publicationInputs = buildPublicationInputsFromSourceProduct(
             product,
@@ -755,7 +949,7 @@ async function migrateProducts() {
               );
             } else {
               console.log(
-                `📢 Published to ${publicationInputs.length} publication(s) (same channels as source where possible)`
+                `📢 Published to ${publicationInputs.length} publication(s)`
               );
             }
           } else {
