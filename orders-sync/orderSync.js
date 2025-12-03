@@ -15,7 +15,7 @@ const TARGET_ACCESS_TOKEN = process.env.TARGET_ACCESS_TOKEN;
 const PAGE_SIZE = parseInt(process.env.PAGE_SIZE || "10", 10);
 
 if (!SOURCE_SHOP || !SOURCE_ACCESS_TOKEN || !TARGET_SHOP || !TARGET_ACCESS_TOKEN) {
-  console.error("❌ Missing env vars: SOURCE_SHOP, SOURCE_ACCESS_TOKEN, TARGET_SHOP, TARGET_ACCESS_TOKEN");
+  console.error("❌ Missing env vars");
   process.exit(1);
 }
 
@@ -65,7 +65,7 @@ async function graphqlRequest(endpoint, token, query, variables = {}, label = ""
 }
 
 /* ============================================
-   FETCH SOURCE ORDERS (ENHANCED)
+   FETCH SOURCE ORDERS
 ============================================ */
 const SOURCE_ORDERS_QUERY = `
   query getOrders($cursor: String, $pageSize: Int!) {
@@ -77,12 +77,14 @@ const SOURCE_ORDERS_QUERY = `
           name
           email
           createdAt
+          processedAt
           displayFinancialStatus
           displayFulfillmentStatus
           fullyPaid
           note
           tags
           currencyCode
+          presentmentCurrencyCode
           totalPriceSet {
             shopMoney {
               amount
@@ -133,6 +135,7 @@ const SOURCE_ORDERS_QUERY = `
               currencyCode
             }
           }
+          taxesIncluded
           customAttributes {
             key
             value
@@ -149,7 +152,9 @@ const SOURCE_ORDERS_QUERY = `
             address2
             city
             province
+            provinceCode
             country
+            countryCode
             zip
             firstName
             lastName
@@ -161,7 +166,9 @@ const SOURCE_ORDERS_QUERY = `
             address2
             city
             province
+            provinceCode
             country
+            countryCode
             zip
             firstName
             lastName
@@ -177,6 +184,7 @@ const SOURCE_ORDERS_QUERY = `
               currentQuantity
               sku
               requiresShipping
+              taxable
               customAttributes {
                 key
                 value
@@ -202,26 +210,6 @@ const SOURCE_ORDERS_QUERY = `
                 }
               }
               discountedUnitPriceSet {
-                shopMoney {
-                  amount
-                  currencyCode
-                }
-                presentmentMoney {
-                  amount
-                  currencyCode
-                }
-              }
-              discountedTotalSet {
-                shopMoney {
-                  amount
-                  currencyCode
-                }
-                presentmentMoney {
-                  amount
-                  currencyCode
-                }
-              }
-              originalTotalSet {
                 shopMoney {
                   amount
                   currencyCode
@@ -265,6 +253,7 @@ const SOURCE_ORDERS_QUERY = `
           shippingLines(first: 10) {
             nodes {
               title
+              code
               originalPriceSet {
                 shopMoney {
                   amount
@@ -281,6 +270,24 @@ const SOURCE_ORDERS_QUERY = `
             nodes {
               ... on DiscountCodeApplication {
                 code
+                allocationMethod
+                targetSelection
+                targetType
+                value {
+                  ... on MoneyV2 {
+                    amount
+                    currencyCode
+                  }
+                  ... on PricingPercentageValue {
+                    percentage
+                  }
+                }
+              }
+              ... on AutomaticDiscountApplication {
+                title
+                allocationMethod
+                targetSelection
+                targetType
                 value {
                   ... on MoneyV2 {
                     amount
@@ -293,6 +300,7 @@ const SOURCE_ORDERS_QUERY = `
               }
               ... on ManualDiscountApplication {
                 title
+                allocationMethod
                 value {
                   ... on MoneyV2 {
                     amount
@@ -318,6 +326,18 @@ const SOURCE_ORDERS_QUERY = `
             estimatedDeliveryAt
             inTransitAt
             displayStatus
+            location {
+              id
+              name
+            }
+            originAddress {
+              address1
+              address2
+              city
+              provinceCode
+              countryCode
+              zip
+            }
             fulfillmentLineItems(first: 250) {
               nodes {
                 id
@@ -335,132 +355,22 @@ const SOURCE_ORDERS_QUERY = `
               }
             }
           }
-        }
-      }
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-    }
-  }
-`;
-
-/* ============================================
-   CHECK IF PRODUCT EXISTS IN TARGET
-============================================ */
-const CHECK_PRODUCT_QUERY = `
-  query getProductByHandle($handle: String!) {
-    productByHandle(handle: $handle) {
-      id
-      variants(first: 250) {
-        nodes {
-          id
-          sku
-          title
-          displayName
-        }
-      }
-    }
-  }
-`;
-
-async function checkProductExists(handle) {
-  try {
-    const data = await graphqlRequest(
-      TARGET_GQL,
-      TARGET_ACCESS_TOKEN,
-      CHECK_PRODUCT_QUERY,
-      { handle },
-      `check product ${handle}`
-    );
-    return data.productByHandle;
-  } catch (err) {
-    return null;
-  }
-}
-
-/* ============================================
-   FETCH TARGET CUSTOMERS MAP (by email)
-============================================ */
-const TARGET_CUSTOMERS_QUERY = `
-  query getCustomers($cursor: String) {
-    customers(first: 250, after: $cursor) {
-      edges {
-        cursor
-        node {
-          id
-          email
-          firstName
-          lastName
-          companyContactProfiles {
-            company {
-              id
-              name
-            }
-          }
-        }
-      }
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-    }
-  }
-`;
-
-async function fetchTargetCustomersMap() {
-  const map = new Map(); // email -> { customerId, companyId }
-  let cursor = null;
-
-  while (true) {
-    const data = await graphqlRequest(
-      TARGET_GQL,
-      TARGET_ACCESS_TOKEN,
-      TARGET_CUSTOMERS_QUERY,
-      { cursor },
-      "fetch target customers"
-    );
-
-    const edges = data.customers.edges;
-    for (const edge of edges) {
-      const customer = edge.node;
-      const company = customer.companyContactProfiles?.nodes?.[0]?.company;
-
-      if (!customer.email) continue;
-
-      map.set(customer.email.toLowerCase(), {
-        customerId: customer.id,
-        companyId: company?.id || null,
-        companyName: company?.name || null,
-      });
-    }
-
-    if (!data.customers.pageInfo.hasNextPage) break;
-    cursor = data.customers.pageInfo.endCursor;
-  }
-
-  return map;
-}
-
-/* ============================================
-   FETCH TARGET DISCOUNTS
-============================================ */
-const TARGET_DISCOUNTS_QUERY = `
-  query getDiscounts($cursor: String) {
-    codeDiscountNodes(first: 250, after: $cursor) {
-      edges {
-        cursor
-        node {
-          id
-          codeDiscount {
-            ... on DiscountCodeBasic {
-              title
-              codes(first: 1) {
-                nodes {
-                  code
-                }
+          transactions(first: 250) {
+            id
+            kind
+            status
+            gateway
+            amountSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+              presentmentMoney {
+                amount
+                currencyCode
               }
             }
+            processedAt
           }
         }
       }
@@ -472,187 +382,35 @@ const TARGET_DISCOUNTS_QUERY = `
   }
 `;
 
-async function fetchTargetDiscountsMap() {
-  const map = new Map(); // code -> discountNodeId
-  let cursor = null;
-
-  while (true) {
-    const data = await graphqlRequest(
-      TARGET_GQL,
-      TARGET_ACCESS_TOKEN,
-      TARGET_DISCOUNTS_QUERY,
-      { cursor },
-      "fetch target discounts"
-    );
-
-    const edges = data.codeDiscountNodes.edges;
-    for (const edge of edges) {
-      const codeDiscount = edge.node.codeDiscount;
-      const code = codeDiscount?.codes?.nodes?.[0]?.code;
-      if (code) {
-        map.set(code.toLowerCase(), edge.node.id);
-      }
-    }
-
-    if (!data.codeDiscountNodes.pageInfo.hasNextPage) break;
-    cursor = data.codeDiscountNodes.pageInfo.endCursor;
-  }
-
-  return map;
-}
-
 /* ============================================
-   CREATE DISCOUNT CODE IN TARGET
+   ORDER CREATE MUTATION
 ============================================ */
-const CREATE_DISCOUNT_MUTATION = `
-  mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
-    discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
-      codeDiscountNode {
-        id
-        codeDiscount {
-          ... on DiscountCodeBasic {
-            title
-            codes(first: 1) {
-              nodes {
-                code
-              }
-            }
-          }
-        }
-      }
-      userErrors {
-        field
-        message
-        code
-      }
-    }
-  }
-`;
-
-async function createDiscount(code, discountValue, isPercentage = true) {
-  console.log(`   🎟️  Creating discount: ${code} (${isPercentage ? discountValue + "%" : "$" + discountValue})`);
-
-  const basicCodeDiscount = {
-    title: `Migrated: ${code}`,
-    code: code,
-    startsAt: new Date().toISOString(),
-    customerSelection: {
-      all: true,
-    },
-    customerGets: {
-      value: isPercentage
-        ? { percentage: discountValue / 100 }
-        : {
-          discountAmount: {
-            amount: discountValue,
-            appliesOnEachItem: false,
-          },
-        },
-      items: {
-        all: true,
-      },
-    },
-  };
-
-  try {
-    const data = await graphqlRequest(
-      TARGET_GQL,
-      TARGET_ACCESS_TOKEN,
-      CREATE_DISCOUNT_MUTATION,
-      { basicCodeDiscount },
-      `create discount ${code}`
-    );
-
-    if (data.discountCodeBasicCreate.userErrors?.length) {
-      console.error("⚠️  Discount creation errors:", data.discountCodeBasicCreate.userErrors);
-      return null;
-    }
-
-    return data.discountCodeBasicCreate.codeDiscountNode.id;
-  } catch (err) {
-    console.error(`⚠️  Failed to create discount: ${err.message}`);
-    return null;
-  }
-}
-
-/* ============================================
-   CREATE DRAFT ORDER
-============================================ */
-const CREATE_DRAFT_ORDER_MUTATION = `
-  mutation draftOrderCreate($input: DraftOrderInput!) {
-    draftOrderCreate(input: $input) {
-      draftOrder {
-        id
-        name
-        order {
-          id
-          name
-        }
-      }
+const ORDER_CREATE_MUTATION = `
+  mutation orderCreate($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
+    orderCreate(order: $order, options: $options) {
       userErrors {
         field
         message
       }
-    }
-  }
-`;
-
-/* ============================================
-   COMPLETE DRAFT ORDER
-============================================ */
-const COMPLETE_DRAFT_ORDER_MUTATION = `
-  mutation draftOrderComplete($id: ID!, $paymentPending: Boolean) {
-    draftOrderComplete(id: $id, paymentPending: $paymentPending) {
-      draftOrder {
-        id
-        order {
-          id
-          name
-        }
-      }
-      userErrors {
-        field
-        message
-      }
-    }
-  }
-`;
-
-/* ============================================
-   DELETE DRAFT ORDER
-============================================ */
-const DELETE_DRAFT_ORDER_MUTATION = `
-  mutation draftOrderDelete($input: DraftOrderDeleteInput!) {
-    draftOrderDelete(input: $input) {
-      deletedId
-      userErrors {
-        field
-        message
-      }
-    }
-  }
-`;
-
-/* ============================================
-   MARK ORDER AS PAID
-============================================ */
-const MARK_AS_PAID_MUTATION = `
-  mutation orderMarkAsPaid($input: OrderMarkAsPaidInput!) {
-    orderMarkAsPaid(input: $input) {
       order {
         id
+        name
+        email
         displayFinancialStatus
-      }
-      userErrors {
-        field
-        message
+        displayFulfillmentStatus
+        totalPriceSet {
+          shopMoney {
+            amount
+            currencyCode
+          }
+        }
       }
     }
   }
 `;
 
 /* ============================================
-   QUERY ORDER FULFILLMENT ORDERS (SOURCE & TARGET)
+   FULFILLMENT ORDERS QUERY (for holds + fulfillments)
 ============================================ */
 const GET_FULFILLMENT_ORDERS_QUERY = `
   query getFulfillmentOrders($orderId: ID!) {
@@ -734,7 +492,7 @@ const FULFILLMENT_ORDER_HOLD_MUTATION = `
 `;
 
 /* ============================================
-   Helper: Build FO signature by SKU or Variant Title + remaining qty
+   Helper: Build FO signature by SKU/variantTitle + remaining qty
 ============================================ */
 function buildFulfillmentOrderSignature(foNode) {
   const idCounts = new Map(); // identifier -> quantity
@@ -750,7 +508,6 @@ function buildFulfillmentOrderSignature(foNode) {
     if (!identifier) continue;
 
     const rem = foli.remainingQuantity ?? 0;
-
     idCounts.set(identifier, (idCounts.get(identifier) || 0) + rem);
   }
 
@@ -763,80 +520,268 @@ function buildFulfillmentOrderSignature(foNode) {
 }
 
 /* ============================================
-   BUILD DRAFT ORDER INPUT
+   CHECK IF PRODUCT EXISTS IN TARGET
 ============================================ */
-function buildDraftOrderInput(sourceOrder, targetCustomerData, lineItems) {
-  const input = {
-    email: sourceOrder.email,
-    note: sourceOrder.note || `Migrated from ${sourceOrder.name}`,
-    tags: [...(sourceOrder.tags || []), "migrated"],
-  };
+const CHECK_PRODUCT_QUERY = `
+  query getProductByHandle($handle: String!) {
+    productByHandle(handle: $handle) {
+      id
+      variants(first: 250) {
+        nodes {
+          id
+          sku
+          title
+          displayName
+        }
+      }
+    }
+  }
+`;
 
-  // Order-level custom attributes
-  if (sourceOrder.customAttributes?.length) {
-    input.customAttributes = sourceOrder.customAttributes.map((attr) => ({
-      key: attr.key,
-      value: attr.value,
-    }));
+async function checkProductExists(handle) {
+  try {
+    const data = await graphqlRequest(
+      TARGET_GQL,
+      TARGET_ACCESS_TOKEN,
+      CHECK_PRODUCT_QUERY,
+      { handle },
+      `check product ${handle}`
+    );
+    return data.productByHandle;
+  } catch (err) {
+    return null;
+  }
+}
+
+
+/* ============================================
+   FETCH TARGET CUSTOMERS MAP
+============================================ */
+const TARGET_CUSTOMERS_QUERY = `
+  query getCustomers($cursor: String) {
+    customers(first: 250, after: $cursor) {
+      edges {
+        cursor
+        node {
+          id
+          email
+          firstName
+          lastName
+          companyContactProfiles {
+              company {
+                id
+                name
+            }
+          }
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
+async function fetchTargetCustomersMap() {
+  const map = new Map(); // email -> { customerId, companyId }
+  let cursor = null;
+
+  while (true) {
+    const data = await graphqlRequest(
+      TARGET_GQL,
+      TARGET_ACCESS_TOKEN,
+      TARGET_CUSTOMERS_QUERY,
+      { cursor },
+      "fetch target customers"
+    );
+
+    const edges = data.customers.edges;
+    for (const edge of edges) {
+      const customer = edge.node;
+      const company = customer.companyContactProfiles?.nodes?.[0]?.company;
+
+      if (!customer.email) continue;
+
+      map.set(customer.email.toLowerCase(), {
+        customerId: customer.id,
+        companyId: company?.id || null,
+        companyName: company?.name || null,
+      });
+    }
+
+    if (!data.customers.pageInfo.hasNextPage) break;
+    cursor = data.customers.pageInfo.endCursor;
   }
 
-  // Customer assignment (B2B requires purchasingEntity)
-  if (targetCustomerData) {
-    if (targetCustomerData.companyId) {
-      input.purchasingEntity = {
-        customerId: targetCustomerData.customerId,
-        companyId: targetCustomerData.companyId,
-      };
-    } else {
-      input.customerId = targetCustomerData.customerId;
+  return map;
+}
+
+/* ============================================
+   FETCH TARGET LOCATIONS (kept if needed later)
+============================================ */
+const TARGET_LOCATIONS_QUERY = `
+  query {
+    locations(first: 250) {
+      nodes {
+        id
+        name
+      }
+    }
+  }
+`;
+
+async function fetchTargetLocations() {
+  const data = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    TARGET_LOCATIONS_QUERY,
+    {},
+    "fetch target locations"
+  );
+  return data.locations?.nodes || [];
+}
+
+/* ============================================
+   Helper: compute total discount + code (from lineItems + applications)
+============================================ */
+function getTotalDiscountAndCode(sourceOrder) {
+  let totalDiscount = 0;
+  let discountCurrency = sourceOrder.presentmentCurrencyCode || sourceOrder.currencyCode;
+
+  // Sum line-item discount allocations
+  for (const li of sourceOrder.lineItems?.nodes || []) {
+    for (const alloc of li.discountAllocations || []) {
+      const amtStr =
+        alloc.allocatedAmountSet?.presentmentMoney?.amount ||
+        alloc.allocatedAmountSet?.shopMoney?.amount;
+      const cur =
+        alloc.allocatedAmountSet?.presentmentMoney?.currencyCode ||
+        alloc.allocatedAmountSet?.shopMoney?.currencyCode;
+      if (!amtStr) continue;
+      const parsed = parseFloat(amtStr);
+      if (!Number.isNaN(parsed)) {
+        totalDiscount += parsed;
+        if (cur) {
+          discountCurrency = cur;
+        }
+      }
     }
   }
 
-  // Line items
-  input.lineItems = lineItems;
+  // Fallback to order-level total discount if line-item sum is 0
+  if (!totalDiscount) {
+    const set = sourceOrder.currentTotalDiscountsSet;
+    const amtStr =
+      set?.presentmentMoney?.amount ||
+      set?.shopMoney?.amount;
+    const cur =
+      set?.presentmentMoney?.currencyCode ||
+      set?.shopMoney?.currencyCode ||
+      discountCurrency;
 
-  // Names: ALWAYS prefer order's address names; only fall back to customer if missing
-  const customerFirst = sourceOrder.customer?.firstName || "";
-  const customerLast = sourceOrder.customer?.lastName || "";
+    if (amtStr) {
+      const parsed = parseFloat(amtStr);
+      if (!Number.isNaN(parsed)) {
+        totalDiscount = parsed;
+        discountCurrency = cur;
+      }
+    }
+  }
 
+  // Try to get a real discount code if present
+  let code = null;
+  for (const app of sourceOrder.discountApplications?.nodes || []) {
+    if (app.code) {
+      code = app.code;
+      break;
+    }
+  }
+  if (!code) {
+    code = "MIGRATED_DISCOUNT";
+  }
+
+  return { totalDiscount, discountCurrency, code };
+}
+
+/* ============================================
+   BUILD ORDER CREATE INPUT
+============================================ */
+function buildOrderCreateInput(sourceOrder, targetCustomerData, lineItems) {
+  const order = {
+    email: sourceOrder.email,
+    currency: sourceOrder.currencyCode,
+    presentmentCurrency: sourceOrder.presentmentCurrencyCode || sourceOrder.currencyCode,
+    processedAt: sourceOrder.processedAt || sourceOrder.createdAt,
+    note: sourceOrder.note,
+    tags: [...(sourceOrder.tags || []), "migrated"],
+    taxesIncluded: sourceOrder.taxesIncluded || false,
+    test: false,
+  };
+
+  // Customer assignment (B2C style only – no purchasingEntity)
+  if (targetCustomerData) {
+    order.customer = {
+      toAssociate: {
+        id: targetCustomerData.customerId,
+      },
+    };
+  }
+
+  // Billing address
   if (sourceOrder.billingAddress) {
-    const billingFirst = sourceOrder.billingAddress.firstName;
-    const billingLast = sourceOrder.billingAddress.lastName;
-
-    input.billingAddress = {
-      address1: sourceOrder.billingAddress.address1,
-      address2: sourceOrder.billingAddress.address2,
-      city: sourceOrder.billingAddress.city,
-      province: sourceOrder.billingAddress.province,
-      country: sourceOrder.billingAddress.country,
-      zip: sourceOrder.billingAddress.zip,
-      firstName: billingFirst ?? customerFirst,
-      lastName: billingLast ?? customerLast,
-      company: sourceOrder.billingAddress.company,
-      phone: sourceOrder.billingAddress.phone || sourceOrder.customer?.phone,
+    const ba = sourceOrder.billingAddress;
+    order.billingAddress = {
+      firstName: ba.firstName,
+      lastName: ba.lastName,
+      address1: ba.address1,
+      address2: ba.address2,
+      city: ba.city,
+      provinceCode: ba.provinceCode,
+      countryCode: ba.countryCode,
+      zip: ba.zip,
+      company: ba.company,
+      phone: ba.phone,
     };
   }
 
-  // Shipping address (use order's shipping address, not customer default)
+  // Shipping address
   if (sourceOrder.shippingAddress) {
-    const shippingFirst = sourceOrder.shippingAddress.firstName;
-    const shippingLast = sourceOrder.shippingAddress.lastName;
-
-    input.shippingAddress = {
-      address1: sourceOrder.shippingAddress.address1,
-      address2: sourceOrder.shippingAddress.address2,
-      city: sourceOrder.shippingAddress.city,
-      province: sourceOrder.shippingAddress.province,
-      country: sourceOrder.shippingAddress.country,
-      zip: sourceOrder.shippingAddress.zip,
-      firstName: shippingFirst ?? customerFirst,
-      lastName: shippingLast ?? customerLast,
-      company: sourceOrder.shippingAddress.company,
-      phone: sourceOrder.shippingAddress.phone || sourceOrder.customer?.phone,
+    const sa = sourceOrder.shippingAddress;
+    order.shippingAddress = {
+      firstName: sa.firstName,
+      lastName: sa.lastName,
+      address1: sa.address1,
+      address2: sa.address2,
+      city: sa.city,
+      provinceCode: sa.provinceCode,
+      countryCode: sa.countryCode,
+      zip: sa.zip,
+      company: sa.company,
+      phone: sa.phone,
     };
   }
 
-  // Shipping line
+  // Line items (net discounted prices)
+  order.lineItems = lineItems;
+
+  // Aggregate all discounts and apply as a single itemFixedDiscountCode
+  const { totalDiscount, discountCurrency, code } = getTotalDiscountAndCode(sourceOrder);
+  if (totalDiscount && totalDiscount > 0) {
+    order.discountCode = {
+      itemFixedDiscountCode: {
+        code,
+        amountSet: {
+          shopMoney: {
+            amount: totalDiscount,
+            currencyCode: discountCurrency,
+          },
+        },
+      },
+    };
+  }
+
+  // Shipping lines
   const shippingLine = sourceOrder.shippingLines?.nodes?.[0];
   if (shippingLine) {
     const shippingPrice =
@@ -844,19 +789,52 @@ function buildDraftOrderInput(sourceOrder, targetCustomerData, lineItems) {
       shippingLine.originalPriceSet?.shopMoney?.amount ||
       "0";
 
-    input.shippingLine = {
-      title: shippingLine.title,
-      price: shippingPrice,
-    };
+    order.shippingLines = [
+      {
+        title: shippingLine.title,
+        priceSet: {
+          shopMoney: {
+            amount: parseFloat(shippingPrice),
+            currencyCode: sourceOrder.currencyCode,
+          },
+        },
+      },
+    ];
   }
 
-  return input;
+  // Financial status & transactions
+  order.financialStatus = sourceOrder.displayFinancialStatus;
+  if (sourceOrder.fullyPaid) {
+    order.transactions = (sourceOrder.transactions || []).map((transaction) => ({
+      kind: transaction.kind,
+      status: transaction.status,
+      gateway: transaction.gateway || "manual",
+      amountSet: {
+        shopMoney: {
+          amount: transaction.amountSet.shopMoney.amount,
+          currencyCode: transaction.amountSet.shopMoney.currencyCode,
+        },
+        presentmentMoney: {
+          amount: transaction.amountSet.presentmentMoney.amount,
+          currencyCode: transaction.amountSet.presentmentMoney.currencyCode,
+        },
+      },
+      processedAt:
+        transaction.processedAt ||
+        sourceOrder.processedAt ||
+        sourceOrder.createdAt,
+    }));
+  }
+
+  // No inline fulfillment here – all fulfillment / holds are mirrored later via v2 mutations
+
+  return order;
 }
 
 /* ============================================
    MIGRATE SINGLE ORDER
 ============================================ */
-async function migrateOrder(sourceOrder, customersMap, discountsMap, productsCache) {
+async function migrateOrder(sourceOrder, customersMap, productsCache) {
   console.log(`\n▶ Migrating order: ${sourceOrder.name}`);
   console.log(`   📧 Customer: ${sourceOrder.email || "No email"}`);
   console.log(
@@ -871,16 +849,16 @@ async function migrateOrder(sourceOrder, customersMap, discountsMap, productsCac
     : null;
 
   if (!targetCustomerData) {
-    console.warn(`   ⚠️  Customer not found in target store: ${sourceOrder.email}`);
+    console.warn(`   ⚠️  Customer not found: ${sourceOrder.email}`);
     return { success: false, reason: "customer_not_found" };
   }
 
-  console.log(`   👤 Found customer: ${targetCustomerData.customerId}`);
+  console.log(`   👤 Customer: ${targetCustomerData.customerId}`);
   if (targetCustomerData.companyId) {
     console.log(`   🏢 Company: ${targetCustomerData.companyName}`);
   }
 
-  // 2. Products / variants
+  // 2. Map products/variants
   const lineItems = [];
   const missingProducts = [];
 
@@ -890,12 +868,11 @@ async function migrateOrder(sourceOrder, customersMap, discountsMap, productsCac
     const sourceVariantTitle = lineItem.variant?.title || lineItem.variant?.displayName;
 
     if (!productHandle) {
-      console.warn(`   ⚠️  Line item missing product: ${lineItem.title}`);
+      console.warn(`   ⚠️  Missing product: ${lineItem.title}`);
       missingProducts.push(lineItem.title);
       continue;
     }
 
-    // Check cache first
     let targetProduct = productsCache.get(productHandle);
     if (!targetProduct) {
       targetProduct = await checkProductExists(productHandle);
@@ -910,49 +887,58 @@ async function migrateOrder(sourceOrder, customersMap, discountsMap, productsCac
       continue;
     }
 
-    // Variant matching: SKU → title → first
+    // Match variant: SKU → title → first
     let targetVariantId = null;
     let matchMethod = null;
 
     if (sourceSku) {
-      const matchingVariant = targetProduct.variants.nodes.find((v) => v.sku === sourceSku);
-      if (matchingVariant) {
-        targetVariantId = matchingVariant.id;
+      const match = targetProduct.variants.nodes.find((v) => v.sku === sourceSku);
+      if (match) {
+        targetVariantId = match.id;
         matchMethod = "SKU";
       }
     }
 
     if (!targetVariantId && sourceVariantTitle) {
-      const matchingVariant = targetProduct.variants.nodes.find(
+      const match = targetProduct.variants.nodes.find(
         (v) => v.title === sourceVariantTitle || v.displayName === sourceVariantTitle
       );
-      if (matchingVariant) {
-        targetVariantId = matchingVariant.id;
+      if (match) {
+        targetVariantId = match.id;
         matchMethod = "Title";
       }
     }
 
     if (!targetVariantId && targetProduct.variants.nodes.length > 0) {
       targetVariantId = targetProduct.variants.nodes[0].id;
-      matchMethod = "First variant (fallback)";
-      console.warn(`   ⚠️  No exact match for ${productHandle}, using first variant`);
+      matchMethod = "Fallback";
+      console.warn(`   ⚠️  Using first variant for ${productHandle}`);
     }
 
     if (!targetVariantId) {
-      console.warn(`   ⚠️  No variant found for: ${productHandle}`);
+      console.warn(`   ⚠️  No variant: ${productHandle}`);
       missingProducts.push(productHandle);
       continue;
     }
 
-    const originalPrice =
+    // Use discounted price to preserve all discounts
+    const priceStr =
+      lineItem.discountedUnitPriceSet?.presentmentMoney?.amount ||
       lineItem.originalUnitPriceSet?.presentmentMoney?.amount ||
-      lineItem.originalUnitPriceSet?.shopMoney?.amount ||
       "0";
+    const price = parseFloat(priceStr);
 
     const lineItemInput = {
       variantId: targetVariantId,
       quantity: lineItem.quantity,
-      originalUnitPrice: originalPrice,
+      priceSet: {
+        shopMoney: {
+          amount: price,
+          currencyCode: sourceOrder.currencyCode,
+        },
+      },
+      requiresShipping: lineItem.requiresShipping,
+      taxable: lineItem.taxable,
     };
 
     if (lineItem.customAttributes?.length) {
@@ -963,9 +949,8 @@ async function migrateOrder(sourceOrder, customersMap, discountsMap, productsCac
     }
 
     lineItems.push(lineItemInput);
-
     console.log(
-      `   ✅ Mapped [${matchMethod}]: ${lineItem.title} (${originalPrice} ${sourceOrder.currencyCode}) → ${targetVariantId}`
+      `   ✅ [${matchMethod}]: ${lineItem.title} (${price} ${sourceOrder.currencyCode})`
     );
   }
 
@@ -975,218 +960,160 @@ async function migrateOrder(sourceOrder, customersMap, discountsMap, productsCac
   }
 
   if (lineItems.length === 0) {
-    console.error("   ❌ No valid line items to migrate");
+    console.error("   ❌ No line items");
     return { success: false, reason: "no_line_items" };
   }
 
-  // 3. Discounts
-  const discountCodes = [];
-  const discountApplications = sourceOrder.discountApplications?.nodes || [];
+  // 3. Build order input
+  const orderInput = buildOrderCreateInput(sourceOrder, targetCustomerData, lineItems);
 
-  for (const discount of discountApplications) {
-    if (discount.code) {
-      const code = discount.code;
-      let discountExists = discountsMap.get(code.toLowerCase());
-
-      if (!discountExists) {
-        const isPercentage = discount.value?.percentage !== undefined;
-        const value = isPercentage
-          ? discount.value.percentage
-          : parseFloat(discount.value?.amount || "0");
-        const newDiscountId = await createDiscount(code, value, isPercentage);
-        if (newDiscountId) {
-          discountsMap.set(code.toLowerCase(), newDiscountId);
-          discountExists = true;
-        }
-      }
-
-      if (discountExists) {
-        discountCodes.push(code);
-        console.log(`   🎟️  Discount applied: ${code}`);
-      }
-    }
-  }
-
-  // 4. Draft order
-  const draftOrderInput = buildDraftOrderInput(sourceOrder, targetCustomerData, lineItems);
-
-  if (discountCodes.length > 0) {
-    draftOrderInput.appliedDiscount = {
-      description: `Migrated discount: ${discountCodes.join(", ")}`,
-      value: 0,
-      valueType: "PERCENTAGE",
-    };
-  }
-
+  // 4. Create order
   try {
-    console.log("   📝 Creating draft order...");
-    const createResult = await graphqlRequest(
+    console.log("   📝 Creating order...");
+
+    const result = await graphqlRequest(
       TARGET_GQL,
       TARGET_ACCESS_TOKEN,
-      CREATE_DRAFT_ORDER_MUTATION,
-      { input: draftOrderInput },
-      `create draft order ${sourceOrder.name}`
+      ORDER_CREATE_MUTATION,
+      {
+        order: orderInput,
+        options: {
+          inventoryBehaviour: "BYPASS",
+          sendReceipt: false,
+          sendFulfillmentReceipt: false,
+        },
+      },
+      `create order ${sourceOrder.name}`
     );
 
-    if (createResult.draftOrderCreate.userErrors?.length) {
-      console.error("   ❌ Draft order errors:", createResult.draftOrderCreate.userErrors);
-      return { success: false, reason: "draft_order_error" };
+    if (result.orderCreate.userErrors?.length) {
+      console.error("   ❌ Order creation errors:", result.orderCreate.userErrors);
+      return {
+        success: false,
+        reason: "order_create_error",
+        errors: result.orderCreate.userErrors,
+      };
     }
 
-    const draftOrderId = createResult.draftOrderCreate.draftOrder.id;
-    console.log(`   ✅ Draft order created: ${draftOrderId}`);
+    const order = result.orderCreate.order;
+    const newOrderId = order.id;
+    const newOrderName = order.name;
 
-    // 5. Complete draft order (respect source payment status)
-    console.log("   ⚙️  Completing draft order...");
-    const paymentPending = !sourceOrder.fullyPaid;
-
-    const completeResult = await graphqlRequest(
-      TARGET_GQL,
-      TARGET_ACCESS_TOKEN,
-      COMPLETE_DRAFT_ORDER_MUTATION,
-      { id: draftOrderId, paymentPending },
-      `complete draft order ${sourceOrder.name}`
+    console.log(`   ✅ Order created: ${newOrderName} (${newOrderId})`);
+    console.log(`   💳 Financial: ${order.displayFinancialStatus}`);
+    console.log(
+      `   📦 Fulfillment: ${order.displayFulfillmentStatus}`
+    );
+    console.log(
+      `   💰 Total: ${order.totalPriceSet.shopMoney.amount} ${order.totalPriceSet.shopMoney.currencyCode}`
     );
 
-    if (completeResult.draftOrderComplete.userErrors?.length) {
-      console.error("   ❌ Complete order errors:", completeResult.draftOrderComplete.userErrors);
-      return { success: false, reason: "complete_error", draftOrderId };
-    }
+    /* --------------------------------------------
+       Mirror FULFILLMENT HOLDS (source → target)
+    --------------------------------------------- */
+    try {
+      const sourceFOData = await graphqlRequest(
+        SOURCE_GQL,
+        SOURCE_ACCESS_TOKEN,
+        GET_FULFILLMENT_ORDERS_QUERY,
+        { orderId: sourceOrder.id },
+        `get source fulfillment orders for ${sourceOrder.name}`
+      );
 
-    const orderId = completeResult.draftOrderComplete.draftOrder?.order?.id;
-    const orderName = completeResult.draftOrderComplete.draftOrder?.order?.name;
-    console.log(`   ✅ Order completed: ${orderName} (${orderId})`);
+      const sourceFOEdges = sourceFOData.order?.fulfillmentOrders?.edges || [];
+      const sourceHoldFOs = [];
 
-    // 6. Mark as paid if source was fully paid
-    /*
-    if (sourceOrder.fullyPaid && orderId) {
-      console.log("   💳 Marking order as paid...");
-      try {
-        const markResult = await graphqlRequest(
+      for (const edge of sourceFOEdges) {
+        const fo = edge.node;
+        if (!fo.fulfillmentHolds?.length) continue;
+
+        const lastHold = fo.fulfillmentHolds[fo.fulfillmentHolds.length - 1];
+        const reason = lastHold.reason || "OTHER";
+        const reasonNotes =
+          lastHold.reasonNotes || `Migrated hold from ${sourceOrder.name}`;
+
+        const sig = buildFulfillmentOrderSignature(fo);
+        if (!sig) continue;
+
+        sourceHoldFOs.push({ sig, reason, reasonNotes });
+      }
+
+      if (sourceHoldFOs.length === 0) {
+        console.log("   📌 No fulfillment holds to mirror");
+      } else {
+        console.log(
+          `   📌 Found ${sourceHoldFOs.length} source fulfillment order(s) with holds`
+        );
+
+        const targetFOData = await graphqlRequest(
           TARGET_GQL,
           TARGET_ACCESS_TOKEN,
-          MARK_AS_PAID_MUTATION,
-          { input: { id: orderId } },
-          `mark as paid ${orderName}`
-        );
-        if (markResult.orderMarkAsPaid.userErrors?.length) {
-          console.warn("   ⚠️  Mark-as-paid errors:", markResult.orderMarkAsPaid.userErrors);
-        } else {
-          console.log("   ✅ Order marked as paid");
-        }
-      } catch (err) {
-        console.warn(`   ⚠️  Failed to mark as paid: ${err.message}`);
-      }
-    }
-    */
-
-    /* --------------------------------------------
-       7. Mirror FULFILLMENT HOLDS (source → target)
-    --------------------------------------------- */
-    if (orderId) {
-      try {
-        // 7.1: source fulfillmentOrders + holds
-        const sourceFOData = await graphqlRequest(
-          SOURCE_GQL,
-          SOURCE_ACCESS_TOKEN,
           GET_FULFILLMENT_ORDERS_QUERY,
-          { orderId: sourceOrder.id },
-          `get source fulfillment orders for ${sourceOrder.name}`
+          { orderId: newOrderId },
+          `get target fulfillment orders for ${newOrderName}`
         );
 
-        const sourceFOEdges = sourceFOData.order?.fulfillmentOrders?.edges || [];
-        const sourceHoldFOs = [];
+        const targetFOEdges = targetFOData.order?.fulfillmentOrders?.edges || [];
+        const targetFoMap = new Map();
 
-        for (const edge of sourceFOEdges) {
+        for (const edge of targetFOEdges) {
           const fo = edge.node;
-          if (!fo.fulfillmentHolds?.length) continue;
-
-          const lastHold = fo.fulfillmentHolds[fo.fulfillmentHolds.length - 1];
-          const reason = lastHold.reason || "OTHER";
-          const reasonNotes =
-            lastHold.reasonNotes || `Migrated hold from ${sourceOrder.name}`;
-
           const sig = buildFulfillmentOrderSignature(fo);
-          if (!sig) continue;
-
-          sourceHoldFOs.push({ sig, reason, reasonNotes });
+          if (sig && !targetFoMap.has(sig)) {
+            targetFoMap.set(sig, fo);
+          }
         }
 
-        if (sourceHoldFOs.length === 0) {
-          console.log("   📌 No holds found on source fulfillment orders");
-        } else {
-          console.log(`   📌 Found ${sourceHoldFOs.length} source fulfillment order(s) with holds`);
+        for (const srcHold of sourceHoldFOs) {
+          const targetFo = targetFoMap.get(srcHold.sig);
+          if (!targetFo) {
+            console.warn(
+              `   ⚠️  No matching target FO found for hold signature: ${srcHold.sig}`
+            );
+            continue;
+          }
 
-          // 7.2: target fulfillmentOrders
-          const targetFOData = await graphqlRequest(
-            TARGET_GQL,
-            TARGET_ACCESS_TOKEN,
-            GET_FULFILLMENT_ORDERS_QUERY,
-            { orderId },
-            `get target fulfillment orders for ${orderName}`
+          const fulfillmentHold = {
+            reason: srcHold.reason,
+            reasonNotes: srcHold.reasonNotes,
+          };
+
+          console.log(
+            `   ⏸️  Applying hold to target FO ${targetFo.id} (reason=${srcHold.reason})`
           );
 
-          const targetFOEdges = targetFOData.order?.fulfillmentOrders?.edges || [];
-          const targetFoMap = new Map();
+          const holdResult = await graphqlRequest(
+            TARGET_GQL,
+            TARGET_ACCESS_TOKEN,
+            FULFILLMENT_ORDER_HOLD_MUTATION,
+            { fulfillmentHold, id: targetFo.id },
+            `hold fulfillment order for ${newOrderName}`
+          );
 
-          for (const edge of targetFOEdges) {
-            const fo = edge.node;
-            const sig = buildFulfillmentOrderSignature(fo);
-            if (sig) {
-              if (!targetFoMap.has(sig)) {
-                targetFoMap.set(sig, fo);
-              }
-            }
-          }
-
-          // 7.3: apply holds in target
-          for (const srcHold of sourceHoldFOs) {
-            const targetFo = targetFoMap.get(srcHold.sig);
-            if (!targetFo) {
-              console.warn(
-                `   ⚠️  No matching target fulfillmentOrder found for hold signature: ${srcHold.sig}`
-              );
-              continue;
-            }
-
-            const fulfillmentHold = {
-              reason: srcHold.reason,
-              reasonNotes: srcHold.reasonNotes,
-            };
-
+          if (holdResult.fulfillmentOrderHold.userErrors?.length) {
+            console.error(
+              "   ❌ Hold errors:",
+              holdResult.fulfillmentOrderHold.userErrors
+            );
+          } else {
             console.log(
-              `   ⏸️  Applying hold to target FO ${targetFo.id} (reason=${srcHold.reason})`
+              `   ✅ Hold applied successfully on target fulfillment order ${targetFo.id}`
             );
-
-            const holdResult = await graphqlRequest(
-              TARGET_GQL,
-              TARGET_ACCESS_TOKEN,
-              FULFILLMENT_ORDER_HOLD_MUTATION,
-              { fulfillmentHold, id: targetFo.id },
-              `hold fulfillment order for ${orderName}`
-            );
-
-            if (holdResult.fulfillmentOrderHold.userErrors?.length) {
-              console.error(
-                "   ❌ Hold errors:",
-                holdResult.fulfillmentOrderHold.userErrors
-              );
-            } else {
-              console.log("   ✅ Hold applied successfully on target fulfillment order");
-            }
           }
         }
-      } catch (err) {
-        console.error(`   ❌ Failed to mirror fulfillment holds: ${err.message}`);
       }
+    } catch (err) {
+      console.error(`   ❌ Failed to mirror fulfillment holds: ${err.message}`);
     }
 
     /* --------------------------------------------
-       8. Fulfillments: build qty from source and fulfill target
+       Mirror FULFILLMENTS (quantities + statuses)
     --------------------------------------------- */
     const sourceFulfillments = sourceOrder.fulfillments || [];
-    if (sourceFulfillments.length > 0 && orderId) {
-      console.log(`   📦 Source has ${sourceFulfillments.length} fulfillment(s); mirroring in target...`);
+    if (sourceFulfillments.length > 0) {
+      console.log(
+        `   📦 Source has ${sourceFulfillments.length} fulfillment(s); mirroring in target...`
+      );
 
       const desiredQtyBySku = new Map();
       const desiredQtyByVariantTitle = new Map();
@@ -1212,7 +1139,10 @@ async function migrateOrder(sourceOrder, customersMap, discountsMap, productsCac
         }
       }
 
-      console.log("   📊 Desired quantities to fulfill (by SKU):", Object.fromEntries(desiredQtyBySku));
+      console.log(
+        "   📊 Desired quantities to fulfill (by SKU):",
+        Object.fromEntries(desiredQtyBySku)
+      );
       console.log(
         "   📊 Desired quantities to fulfill (by Variant Title):",
         Object.fromEntries(desiredQtyByVariantTitle)
@@ -1223,15 +1153,15 @@ async function migrateOrder(sourceOrder, customersMap, discountsMap, productsCac
           TARGET_GQL,
           TARGET_ACCESS_TOKEN,
           GET_FULFILLMENT_ORDERS_QUERY,
-          { orderId },
-          `get fulfillment orders for ${orderName}`
+          { orderId: newOrderId },
+          `get fulfillment orders for ${newOrderName}`
         );
 
         const fulfillmentOrderEdges =
           fulfillmentOrdersData.order?.fulfillmentOrders?.edges || [];
 
         if (fulfillmentOrderEdges.length === 0) {
-          console.warn("   ⚠️  No fulfillment orders found for target order");
+          console.warn("   ⚠️  No fulfillment orders found in target");
         } else {
           console.log(
             `   📋 Found ${fulfillmentOrderEdges.length} fulfillment order(s) in target`
@@ -1307,10 +1237,12 @@ async function migrateOrder(sourceOrder, customersMap, discountsMap, productsCac
           }
 
           if (lineItemsByFulfillmentOrder.length === 0) {
-            console.warn("   ⚠️  No fulfillable items found in target for desired quantities");
+            console.warn(
+              "   ⚠️  No fulfillable items found in target for desired quantities"
+            );
           } else {
             const fulfillmentInput = {
-              notifyCustomer: false, // set true if you want emails
+              notifyCustomer: false,
               lineItemsByFulfillmentOrder,
             };
 
@@ -1326,7 +1258,7 @@ async function migrateOrder(sourceOrder, customersMap, discountsMap, productsCac
                 fulfillment: fulfillmentInput,
                 message: `Migrated fulfillment for ${sourceOrder.name}`,
               },
-              `create fulfillment for ${orderName}`
+              `create fulfillment for ${newOrderName}`
             );
 
             if (fulfillmentResult.fulfillmentCreateV2.userErrors?.length) {
@@ -1339,52 +1271,43 @@ async function migrateOrder(sourceOrder, customersMap, discountsMap, productsCac
                 fulfillmentResult.fulfillmentCreateV2.fulfillment?.displayStatus ||
                 fulfillmentResult.fulfillmentCreateV2.fulfillment?.status ||
                 "UNKNOWN";
-              console.log(`   ✅ Fulfillment created successfully: ${fulfillmentStatus}`);
+              console.log(
+                `   ✅ Fulfillment created successfully: ${fulfillmentStatus}`
+              );
             }
           }
         }
       } catch (err) {
-        console.error(`   ❌ Failed to fulfill target order: ${err.message}`);
+        console.error(`   ❌ Failed to mirror fulfillments: ${err.message}`);
       }
+    } else {
+      console.log("   📦 No source fulfillments to mirror");
     }
-
-    // 9. Delete draft order
-    console.log("   🗑️  Deleting draft order...");
-    await graphqlRequest(
-      TARGET_GQL,
-      TARGET_ACCESS_TOKEN,
-      DELETE_DRAFT_ORDER_MUTATION,
-      { input: { id: draftOrderId } },
-      `delete draft order ${sourceOrder.name}`
-    );
-    console.log("   ✅ Draft order deleted");
 
     return {
       success: true,
-      orderId,
-      orderName,
+      orderId: newOrderId,
+      orderName: newOrderName,
       sourceOrderName: sourceOrder.name,
-      hasFulfillments: (sourceOrder.fulfillments || []).length > 0,
-      fulfillmentStatus: sourceOrder.displayFulfillmentStatus,
     };
   } catch (err) {
-    console.error(`   ❌ Migration failed: ${err.message}`);
+    console.error(`   ❌ Failed: ${err.message}`);
     return { success: false, reason: "exception", error: err.message };
   }
 }
 
 /* ============================================
-   MAIN MIGRATION LOOP
+   MAIN
 ============================================ */
 async function migrateOrders() {
-  console.log("🚀 Starting Order Migration B2C → B2B\n");
+  console.log("🚀 Starting Order Migration \n");
 
   console.log("📋 Fetching target store data...");
   const customersMap = await fetchTargetCustomersMap();
-  console.log(`   ✅ Loaded ${customersMap.size} customers`);
+  console.log(`   ✅ ${customersMap.size} customers`);
 
-  const discountsMap = await fetchTargetDiscountsMap();
-  console.log(`   ✅ Loaded ${discountsMap.size} discount codes`);
+  const targetLocations = await fetchTargetLocations();
+  console.log(`   ✅ ${targetLocations.length} locations`);
 
   const productsCache = new Map();
 
@@ -1410,22 +1333,26 @@ async function migrateOrders() {
       const order = edge.node;
       totalCount++;
 
-      const result = await migrateOrder(order, customersMap, discountsMap, productsCache);
+      const result = await migrateOrder(order, customersMap, productsCache);
 
       if (result.success) {
         successCount++;
-        console.log(`   ✅ SUCCESS: ${result.sourceOrderName} → ${result.orderName}\n`);
+        console.log(
+          `   ✅ SUCCESS: ${result.sourceOrderName} → ${result.orderName}\n`
+        );
       } else {
         failureCount++;
         failures.push({
           sourceOrder: order.name,
           reason: result.reason,
-          details: result.missing || result.error || "",
+          details:
+            result.missing ||
+            result.error ||
+            (result.errors ? JSON.stringify(result.errors) : ""),
         });
         console.log(`   ❌ FAILED: ${order.name} (${result.reason})\n`);
       }
 
-      // Rate limiting delay
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
 
@@ -1433,18 +1360,20 @@ async function migrateOrders() {
     cursor = data.orders.pageInfo.endCursor;
   }
 
-  // Summary
   console.log("\n" + "=".repeat(60));
   console.log("🎉 MIGRATION COMPLETE");
   console.log("=".repeat(60));
-  console.log(`📊 Total Orders: ${totalCount}`);
-  console.log(`✅ Successful: ${successCount}`);
+  console.log(`📊 Total: ${totalCount}`);
+  console.log(`✅ Success: ${successCount}`);
   console.log(`❌ Failed: ${failureCount}`);
 
   if (failures.length > 0) {
     console.log("\n⚠️  Failed Orders:");
     failures.forEach((f) => {
-      console.log(`   - ${f.sourceOrder}: ${f.reason} ${f.details ? `(${f.details})` : ""}`);
+      console.log(
+        `   - ${f.sourceOrder}: ${f.reason} ${f.details ? `(${f.details})` : ""
+        }`
+      );
     });
   }
 }
