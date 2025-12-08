@@ -1,0 +1,633 @@
+[
+    {
+        "id": "gid://shopify/Company/43175543149",
+        "name": "Key Com Pro",
+        "externalId": "key_com_pro",
+        "note": null,
+        "metafields": {
+            "edges": []
+        },
+        "locations": {
+            "edges": [
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyLocation/109766607213",
+                        "name": "Scott",
+                        "shippingAddress": {
+                            "firstName": "Scott",
+                            "lastName": "KeyComPro",
+                            "address1": "502 North 78th Avenue",
+                            "address2": "",
+                            "city": "Greeley",
+                            "province": "Colorado",
+                            "zip": "80634",
+                            "country": "United States",
+                            "countryCode": "US",
+                            "zoneCode": "CO",
+                            "phone": "+19707754309",
+                            "companyName": "Key Com Pro"
+                        },
+                        "billingAddress": {
+                            "firstName": "Scott",
+                            "lastName": "KeyComPro",
+                            "address1": "502 N 78th ave",
+                            "address2": "",
+                            "city": "Greeley",
+                            "province": "Colorado",
+                            "zip": "80634",
+                            "country": "United States",
+                            "countryCode": "US",
+                            "zoneCode": "CO",
+                            "phone": "+19707754309",
+                            "companyName": "Key Com Pro"
+                        }
+                    }
+                },
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyLocation/109769425261",
+                        "name": "Nathan",
+                        "shippingAddress": {
+                            "firstName": "Nathan",
+                            "lastName": "Spindler",
+                            "address1": "153 West Dogwood Street",
+                            "address2": null,
+                            "city": "Milliken",
+                            "province": "Colorado",
+                            "zip": "80543",
+                            "country": "United States",
+                            "countryCode": "US",
+                            "zoneCode": "CO",
+                            "phone": "+19708001982",
+                            "companyName": "Key Com Pro"
+                        },
+                        "billingAddress": {
+                            "firstName": "Nathan",
+                            "lastName": "Spindler",
+                            "address1": "153 West Dogwood Street",
+                            "address2": null,
+                            "city": "Milliken",
+                            "province": "Colorado",
+                            "zip": "80543",
+                            "country": "United States",
+                            "countryCode": "US",
+                            "zoneCode": "CO",
+                            "phone": "+19708001982",
+                            "companyName": "Key Com Pro"
+                        }
+                    }
+                }
+            ]
+        },
+        "contactRoles": {
+            "edges": [
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyContactRole/86344565101",
+                        "name": "Location admin"
+                    }
+                },
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyContactRole/86344597869",
+                        "name": "Ordering only"
+                    }
+                }
+            ]
+        },
+        "contacts": {
+            "edges": [
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyContact/5928288621",
+                        "isMainContact": false,
+                        "customer": {
+                            "id": "gid://shopify/Customer/5698189295780",
+                            "email": "natespindler@gmail.com",
+                            "phone": "+19708001982",
+                            "firstName": "NATHAN SPINDLER",
+                            "lastName": "Key Com Pro",
+                            "note": "5% discount on all orders. +always include Expedite (UPS 2nd Day Air) Shipping when quoting!",
+                            "tags": [
+                                "+ Review",
+                                "Aug and Sep 2021",
+                                "Exclude",
+                                "October 2021"
+                            ],
+                            "defaultAddress": {
+                                "address1": "153 W DOGWOOD ST",
+                                "address2": "",
+                                "city": "Milliken",
+                                "province": "Colorado",
+                                "provinceCode": "CO",
+                                "country": "United States",
+                                "countryCodeV2": "US",
+                                "zip": "80543",
+                                "phone": "+19708001982",
+                                "firstName": "Nathan",
+                                "lastName": "Spindler",
+                                "company": "KeyComPro"
+                            },
+                            "metafields": {
+                                "edges": []
+                            },
+                            "emailMarketingConsent": {
+                                "marketingState": "SUBSCRIBED",
+                                "marketingOptInLevel": "SINGLE_OPT_IN",
+                                "consentUpdatedAt": "2021-09-22T15:09:47Z"
+                            },
+                            "smsMarketingConsent": {
+                                "marketingState": "NOT_SUBSCRIBED",
+                                "marketingOptInLevel": "SINGLE_OPT_IN",
+                                "consentUpdatedAt": null
+                            },
+                            "companyContactProfiles": [
+                                {
+                                    "company": {
+                                        "id": "gid://shopify/Company/43175543149"
+                                    },
+                                    "roleAssignments": {
+                                        "nodes": [
+                                            {
+                                                "companyLocation": {
+                                                    "id": "gid://shopify/CompanyLocation/109769425261",
+                                                    "name": "Nathan"
+                                                },
+                                                "role": {
+                                                    "id": "gid://shopify/CompanyContactRole/86344597869",
+                                                    "name": "Ordering only"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                },
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyContact/5928386925",
+                        "isMainContact": false,
+                        "customer": {
+                            "id": "gid://shopify/Customer/5484466241700",
+                            "email": "keycompro@gmail.com",
+                            "phone": null,
+                            "firstName": "Scott",
+                            "lastName": "Key Com Pro",
+                            "note": "Do not forget to emphasize core rebates!",
+                            "tags": [
+                                "OCT22"
+                            ],
+                            "defaultAddress": {
+                                "address1": "502 N 78th Ave",
+                                "address2": "",
+                                "city": "Greeley",
+                                "province": "Colorado",
+                                "provinceCode": "CO",
+                                "country": "United States",
+                                "countryCodeV2": "US",
+                                "zip": "80634",
+                                "phone": "+19707754309",
+                                "firstName": "Scott",
+                                "lastName": "KeyComPro",
+                                "company": null
+                            },
+                            "metafields": {
+                                "edges": []
+                            },
+                            "emailMarketingConsent": {
+                                "marketingState": "SUBSCRIBED",
+                                "marketingOptInLevel": "SINGLE_OPT_IN",
+                                "consentUpdatedAt": "2021-07-10T00:07:47Z"
+                            },
+                            "smsMarketingConsent": null,
+                            "companyContactProfiles": [
+                                {
+                                    "company": {
+                                        "id": "gid://shopify/Company/43175543149"
+                                    },
+                                    "roleAssignments": {
+                                        "nodes": [
+                                            {
+                                                "companyLocation": {
+                                                    "id": "gid://shopify/CompanyLocation/109766607213",
+                                                    "name": "Scott"
+                                                },
+                                                "role": {
+                                                    "id": "gid://shopify/CompanyContactRole/86344597869",
+                                                    "name": "Ordering only"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            ]
+        }
+    },
+    {
+        "id": "gid://shopify/Company/48227909997",
+        "name": "Zane Sims",
+        "externalId": null,
+        "note": null,
+        "metafields": {
+            "edges": []
+        },
+        "locations": {
+            "edges": [
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyLocation/128933921133",
+                        "name": "301 Vista Boulevard",
+                        "shippingAddress": {
+                            "firstName": "ars",
+                            "lastName": "automotive",
+                            "address1": "301 Vista Boulevard",
+                            "address2": null,
+                            "city": "Sparks",
+                            "province": "Nevada",
+                            "zip": "89434",
+                            "country": "United States",
+                            "countryCode": "US",
+                            "zoneCode": "NV",
+                            "phone": "+17757413538",
+                            "companyName": "Zane Sims"
+                        },
+                        "billingAddress": {
+                            "firstName": "ars",
+                            "lastName": "automotive",
+                            "address1": "301 Vista Boulevard",
+                            "address2": null,
+                            "city": "Sparks",
+                            "province": "Nevada",
+                            "zip": "89434",
+                            "country": "United States",
+                            "countryCode": "US",
+                            "zoneCode": "NV",
+                            "phone": "+17757413538",
+                            "companyName": "Zane Sims"
+                        }
+                    }
+                }
+            ]
+        },
+        "contactRoles": {
+            "edges": [
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyContactRole/96444711277",
+                        "name": "Location admin"
+                    }
+                },
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyContactRole/96444744045",
+                        "name": "Ordering only"
+                    }
+                }
+            ]
+        },
+        "contacts": {
+            "edges": [
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyContact/6254133613",
+                        "isMainContact": true,
+                        "customer": {
+                            "id": "gid://shopify/Customer/6132153712882",
+                            "email": "partssaver@yahoo.com",
+                            "phone": "+17757413538",
+                            "firstName": "Zane",
+                            "lastName": "Sims",
+                            "note": "If he calls the main line, tell him to contact Jeniffer",
+                            "tags": [
+                                "Exclude"
+                            ],
+                            "defaultAddress": {
+                                "address1": "301 Vista Boulevard",
+                                "address2": null,
+                                "city": "Sparks",
+                                "province": "Nevada",
+                                "provinceCode": "NV",
+                                "country": "United States",
+                                "countryCodeV2": "US",
+                                "zip": "89434",
+                                "phone": "+1 775-741-3538",
+                                "firstName": "ars",
+                                "lastName": "automotive",
+                                "company": null
+                            },
+                            "metafields": {
+                                "edges": []
+                            },
+                            "emailMarketingConsent": {
+                                "marketingState": "SUBSCRIBED",
+                                "marketingOptInLevel": "SINGLE_OPT_IN",
+                                "consentUpdatedAt": "2022-03-24T17:42:42Z"
+                            },
+                            "smsMarketingConsent": {
+                                "marketingState": "NOT_SUBSCRIBED",
+                                "marketingOptInLevel": "SINGLE_OPT_IN",
+                                "consentUpdatedAt": null
+                            },
+                            "companyContactProfiles": [
+                                {
+                                    "company": {
+                                        "id": "gid://shopify/Company/48227909997"
+                                    },
+                                    "roleAssignments": {
+                                        "nodes": [
+                                            {
+                                                "companyLocation": {
+                                                    "id": "gid://shopify/CompanyLocation/128933921133",
+                                                    "name": "301 Vista Boulevard"
+                                                },
+                                                "role": {
+                                                    "id": "gid://shopify/CompanyContactRole/96444711277",
+                                                    "name": "Location admin"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            ]
+        }
+    },
+    {
+        "id": "gid://shopify/Company/48227975533",
+        "name": "Ralph Scorpion Motorsports",
+        "externalId": null,
+        "note": null,
+        "metafields": {
+            "edges": []
+        },
+        "locations": {
+            "edges": [
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyLocation/128933986669",
+                        "name": "6232 North Inwood Road",
+                        "shippingAddress": {
+                            "firstName": "Ralph",
+                            "lastName": "Welch",
+                            "address1": "6232 North Inwood Road",
+                            "address2": null,
+                            "city": "Shreveport",
+                            "province": "Louisiana",
+                            "zip": "71119",
+                            "country": "United States",
+                            "countryCode": "US",
+                            "zoneCode": "LA",
+                            "phone": "+13188348682",
+                            "companyName": "Ralph Scorpion Motorsports"
+                        },
+                        "billingAddress": {
+                            "firstName": "Ralph",
+                            "lastName": "Welch",
+                            "address1": "6232 North Inwood Road",
+                            "address2": null,
+                            "city": "Shreveport",
+                            "province": "Louisiana",
+                            "zip": "71119",
+                            "country": "United States",
+                            "countryCode": "US",
+                            "zoneCode": "LA",
+                            "phone": "+13188348682",
+                            "companyName": "Ralph Scorpion Motorsports"
+                        }
+                    }
+                }
+            ]
+        },
+        "contactRoles": {
+            "edges": [
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyContactRole/96444842349",
+                        "name": "Location admin"
+                    }
+                },
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyContactRole/96444875117",
+                        "name": "Ordering only"
+                    }
+                }
+            ]
+        },
+        "contacts": {
+            "edges": [
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyContact/6254199149",
+                        "isMainContact": true,
+                        "customer": {
+                            "id": "gid://shopify/Customer/6286723743986",
+                            "email": "bjwelch76@gmail.com",
+                            "phone": "+13188348682",
+                            "firstName": "Ralph",
+                            "lastName": "Scorpion Motorsports",
+                            "note": "5% discount all orders. \nLeft us a 5 star review. \nHe has a 2nd account, bjwelch76@msn.com 5% discount all orders. Left us a 5 star review.\nsee alternate account: bjwelch76@gmail.com",
+                            "tags": [
+                                "+ Review",
+                                "JULY22",
+                                "June22"
+                            ],
+                            "defaultAddress": {
+                                "address1": "6232 North Inwood Road",
+                                "address2": null,
+                                "city": "Shreveport",
+                                "province": "Louisiana",
+                                "provinceCode": "LA",
+                                "country": "United States",
+                                "countryCodeV2": "US",
+                                "zip": "71119",
+                                "phone": "+13188348682",
+                                "firstName": "Ralph",
+                                "lastName": "Welch",
+                                "company": "Scorpion Motorsports"
+                            },
+                            "metafields": {
+                                "edges": []
+                            },
+                            "emailMarketingConsent": {
+                                "marketingState": "SUBSCRIBED",
+                                "marketingOptInLevel": "SINGLE_OPT_IN",
+                                "consentUpdatedAt": "2022-07-25T18:14:25Z"
+                            },
+                            "smsMarketingConsent": {
+                                "marketingState": "NOT_SUBSCRIBED",
+                                "marketingOptInLevel": "SINGLE_OPT_IN",
+                                "consentUpdatedAt": null
+                            },
+                            "companyContactProfiles": [
+                                {
+                                    "company": {
+                                        "id": "gid://shopify/Company/48227975533"
+                                    },
+                                    "roleAssignments": {
+                                        "nodes": [
+                                            {
+                                                "companyLocation": {
+                                                    "id": "gid://shopify/CompanyLocation/128933986669",
+                                                    "name": "6232 North Inwood Road"
+                                                },
+                                                "role": {
+                                                    "id": "gid://shopify/CompanyContactRole/96444842349",
+                                                    "name": "Location admin"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            ]
+        }
+    },
+    {
+        "id": "gid://shopify/Company/48228139373",
+        "name": "Gwinnett Chrysler",
+        "externalId": null,
+        "note": null,
+        "metafields": {
+            "edges": []
+        },
+        "locations": {
+            "edges": [
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyLocation/128936640877",
+                        "name": "5054 Hwy 78",
+                        "shippingAddress": {
+                            "firstName": "Gwinnett",
+                            "lastName": "Chrysler",
+                            "address1": "5054 Hwy 78",
+                            "address2": null,
+                            "city": "Stone Mountain",
+                            "province": "Georgia",
+                            "zip": "30087",
+                            "country": "United States",
+                            "countryCode": "US",
+                            "zoneCode": "GA",
+                            "phone": "+17709727767",
+                            "companyName": "Gwinnett Chrysler"
+                        },
+                        "billingAddress": {
+                            "firstName": "Gwinnett",
+                            "lastName": "Chrysler",
+                            "address1": "5054 Hwy 78",
+                            "address2": null,
+                            "city": "Stone Mountain",
+                            "province": "Georgia",
+                            "zip": "30087",
+                            "country": "United States",
+                            "countryCode": "US",
+                            "zoneCode": "GA",
+                            "phone": "+17709727767",
+                            "companyName": "Gwinnett Chrysler"
+                        }
+                    }
+                }
+            ]
+        },
+        "contactRoles": {
+            "edges": [
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyContactRole/96445170029",
+                        "name": "Location admin"
+                    }
+                },
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyContactRole/96445202797",
+                        "name": "Ordering only"
+                    }
+                }
+            ]
+        },
+        "contacts": {
+            "edges": [
+                {
+                    "node": {
+                        "id": "gid://shopify/CompanyContact/6254362989",
+                        "isMainContact": true,
+                        "customer": {
+                            "id": "gid://shopify/Customer/3110958530698",
+                            "email": "bsmith@fivestaronline.net",
+                            "phone": null,
+                            "firstName": "Gwinnett",
+                            "lastName": "Chrysler",
+                            "note": "Holiday21 SENT Holiday21 SENT",
+                            "tags": [
+                                "Feb21 Customers",
+                                "GoogleAdsFeedMarch_01_21",
+                                "July Customers",
+                                "Login with Shop",
+                                "March21 Customers",
+                                "October Orders",
+                                "September Orders",
+                                "Shop"
+                            ],
+                            "defaultAddress": {
+                                "address1": "5054 Hwy 78",
+                                "address2": null,
+                                "city": "Stone Mountain",
+                                "province": "Georgia",
+                                "provinceCode": "GA",
+                                "country": "United States",
+                                "countryCodeV2": "US",
+                                "zip": "30087",
+                                "phone": "+1 770-972-7767",
+                                "firstName": "Gwinnett",
+                                "lastName": "Chrysler",
+                                "company": "PO# 39587"
+                            },
+                            "metafields": {
+                                "edges": []
+                            },
+                            "emailMarketingConsent": {
+                                "marketingState": "SUBSCRIBED",
+                                "marketingOptInLevel": "SINGLE_OPT_IN",
+                                "consentUpdatedAt": "2020-03-24T20:31:20Z"
+                            },
+                            "smsMarketingConsent": null,
+                            "companyContactProfiles": [
+                                {
+                                    "company": {
+                                        "id": "gid://shopify/Company/48228139373"
+                                    },
+                                    "roleAssignments": {
+                                        "nodes": [
+                                            {
+                                                "companyLocation": {
+                                                    "id": "gid://shopify/CompanyLocation/128936640877",
+                                                    "name": "5054 Hwy 78"
+                                                },
+                                                "role": {
+                                                    "id": "gid://shopify/CompanyContactRole/96445170029",
+                                                    "name": "Location admin"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            ]
+        }
+    }
+]

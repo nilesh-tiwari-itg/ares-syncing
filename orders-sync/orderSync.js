@@ -178,7 +178,7 @@ function normalizeDateTime(val) {
   try {
     const d = new Date(s);
     if (!isNaN(d.getTime())) return d.toISOString();
-  } catch (_) { }
+  } catch (_) {}
 
   console.warn(`⚠️ Could not normalize date: ${s}`);
   return null;
@@ -803,9 +803,10 @@ function loadOrdersFromSheet(xlsxPath) {
       shippingLines.push({ title, price });
     }
 
-    // Discounts: single MIGRATED_DISCOUNT equal to abs(sum of all discount rows)
+    // Discounts rows
     const discountRows = groupRows.filter((r) => r["Line: Type"] === "Discount");
 
+    // Amount: single totalDiscount equal to abs(sum of all discount rows)
     let sheetDiscountTotal = 0;
     for (const dr of discountRows) {
       let amt = dr["Line: Discount"];
@@ -824,6 +825,23 @@ function loadOrdersFromSheet(xlsxPath) {
     }
 
     const totalDiscount = Math.abs(sheetDiscountTotal);
+
+    // Label: combined discount names -> "CODE1, CODE2"
+    const discountNames = discountRows
+      .map((r) =>
+        r["Line: Name"] ||
+        r["Line: Title"] ||
+        r["Line: Type"] ||
+        null
+      )
+      .filter(Boolean);
+
+    let discountLabel = "MIGRATED_DISCOUNT";
+    if (discountNames.length === 1) {
+      discountLabel = discountNames[0];
+    } else if (discountNames.length > 1) {
+      discountLabel = discountNames.join(", ");
+    }
 
     // Transactions
     const transactions = [];
@@ -905,6 +923,7 @@ function loadOrdersFromSheet(xlsxPath) {
       lineItems,
       shippingLines,
       totalDiscount,
+      discountLabel,
       transactions,
       orderFulfillmentStatus,
       desiredBySku,
@@ -940,6 +959,7 @@ function buildOrderCreateInputFromParsed(parsedOrder, targetCustomerData) {
     lineItems,
     shippingLines,
     totalDiscount,
+    discountLabel,
     transactions,
     metafields,
   } = parsedOrder;
@@ -1011,7 +1031,7 @@ function buildOrderCreateInputFromParsed(parsedOrder, targetCustomerData) {
   if (totalDiscount && totalDiscount > 0) {
     order.discountCode = {
       itemFixedDiscountCode: {
-        code: "MIGRATED_DISCOUNT",
+        code: discountLabel || "MIGRATED_DISCOUNT",
         amountSet: {
           shopMoney: {
             amount: totalDiscount,
