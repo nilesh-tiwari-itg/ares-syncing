@@ -1,25 +1,39 @@
 import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
+import XLSX from "xlsx";
+import { fileURLToPath } from "url";
+
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /* ============================================
    CONFIG
 ============================================ */
 const API_VERSION = process.env.API_VERSION || "2025-10";
 
-const SOURCE_SHOP = process.env.SOURCE_SHOP;
-const SOURCE_ACCESS_TOKEN = process.env.SOURCE_ACCESS_TOKEN;
-
 const TARGET_SHOP = process.env.TARGET_SHOP;
 const TARGET_ACCESS_TOKEN = process.env.TARGET_ACCESS_TOKEN;
 
-const PAGE_SIZE = parseInt(process.env.PAGE_SIZE || "10", 10);
+// Excel file path
+const ORDERS_XLSX =
+  process.env.ORDERS_XLSX ||
+  // path.join(__dirname, "updated_orders.xlsx");
+  path.join(__dirname, "Export_2025-12-04_031652.xlsx");
 
-if (!SOURCE_SHOP || !SOURCE_ACCESS_TOKEN || !TARGET_SHOP || !TARGET_ACCESS_TOKEN) {
-  console.error("❌ Missing env vars");
+// Basic validation
+if (!TARGET_SHOP || !TARGET_ACCESS_TOKEN) {
+  console.error("❌ Missing env vars: TARGET_SHOP, TARGET_ACCESS_TOKEN");
   process.exit(1);
 }
 
-const SOURCE_GQL = `https://${SOURCE_SHOP}/admin/api/${API_VERSION}/graphql.json`;
+if (!fs.existsSync(ORDERS_XLSX)) {
+  console.error(`❌ Excel file not found: ${ORDERS_XLSX}`);
+  process.exit(1);
+}
+
 const TARGET_GQL = `https://${TARGET_SHOP}/admin/api/${API_VERSION}/graphql.json`;
 
 /* ============================================
@@ -53,7 +67,10 @@ async function graphqlRequest(endpoint, token, query, variables = {}, label = ""
     }
 
     if (json.errors?.length) {
-      console.error(`❌ GraphQL Errors (${label}):`, JSON.stringify(json.errors, null, 2));
+      console.error(
+        `❌ GraphQL Errors (${label}):`,
+        JSON.stringify(json.errors, null, 2),
+      );
       throw new Error("GraphQL error");
     }
 
@@ -65,326 +82,112 @@ async function graphqlRequest(endpoint, token, query, variables = {}, label = ""
 }
 
 /* ============================================
-   FETCH SOURCE ORDERS
+   NORMALIZERS
 ============================================ */
-const SOURCE_ORDERS_QUERY = `
-  query getOrders($cursor: String, $pageSize: Int!) {
-    orders(first: $pageSize, after: $cursor) {
-      edges {
-        cursor
-        node {
-          id
-          name
-          email
-          createdAt
-          processedAt
-          displayFinancialStatus
-          displayFulfillmentStatus
-          fullyPaid
-          note
-          tags
-          currencyCode
-          presentmentCurrencyCode
-          totalPriceSet {
-            shopMoney {
-              amount
-              currencyCode
-            }
-            presentmentMoney {
-              amount
-              currencyCode
-            }
-          }
-          subtotalPriceSet {
-            shopMoney {
-              amount
-              currencyCode
-            }
-            presentmentMoney {
-              amount
-              currencyCode
-            }
-          }
-          totalTaxSet {
-            shopMoney {
-              amount
-              currencyCode
-            }
-            presentmentMoney {
-              amount
-              currencyCode
-            }
-          }
-          totalShippingPriceSet {
-            shopMoney {
-              amount
-              currencyCode
-            }
-            presentmentMoney {
-              amount
-              currencyCode
-            }
-          }
-          currentTotalDiscountsSet {
-            shopMoney {
-              amount
-              currencyCode
-            }
-            presentmentMoney {
-              amount
-              currencyCode
-            }
-          }
-          taxesIncluded
-          customAttributes {
-            key
-            value
-          }
-          customer {
-            id
-            email
-            firstName
-            lastName
-            phone
-          }
-          billingAddress {
-            address1
-            address2
-            city
-            province
-            provinceCode
-            country
-            countryCode
-            zip
-            firstName
-            lastName
-            company
-            phone
-          }
-          shippingAddress {
-            address1
-            address2
-            city
-            province
-            provinceCode
-            country
-            countryCode
-            zip
-            firstName
-            lastName
-            company
-            phone
-          }
-          lineItems(first: 250) {
-            nodes {
-              id
-              title
-              name
-              quantity
-              currentQuantity
-              sku
-              requiresShipping
-              taxable
-              customAttributes {
-                key
-                value
-              }
-              variant {
-                id
-                sku
-                title
-                displayName
-                product {
-                  id
-                  handle
-                }
-              }
-              originalUnitPriceSet {
-                shopMoney {
-                  amount
-                  currencyCode
-                }
-                presentmentMoney {
-                  amount
-                  currencyCode
-                }
-              }
-              discountedUnitPriceSet {
-                shopMoney {
-                  amount
-                  currencyCode
-                }
-                presentmentMoney {
-                  amount
-                  currencyCode
-                }
-              }
-              discountAllocations {
-                allocatedAmountSet {
-                  shopMoney {
-                    amount
-                    currencyCode
-                  }
-                  presentmentMoney {
-                    amount
-                    currencyCode
-                  }
-                }
-                discountApplication {
-                  ... on DiscountCodeApplication {
-                    code
-                    value {
-                      ... on MoneyV2 {
-                        amount
-                        currencyCode
-                      }
-                      ... on PricingPercentageValue {
-                        percentage
-                      }
-                    }
-                  }
-                  ... on AutomaticDiscountApplication {
-                    title
-                  }
-                }
-              }
-            }
-          }
-          shippingLines(first: 10) {
-            nodes {
-              title
-              code
-              originalPriceSet {
-                shopMoney {
-                  amount
-                  currencyCode
-                }
-                presentmentMoney {
-                  amount
-                  currencyCode
-                }
-              }
-            }
-          }
-          discountApplications(first: 250) {
-            nodes {
-              ... on DiscountCodeApplication {
-                code
-                allocationMethod
-                targetSelection
-                targetType
-                value {
-                  ... on MoneyV2 {
-                    amount
-                    currencyCode
-                  }
-                  ... on PricingPercentageValue {
-                    percentage
-                  }
-                }
-              }
-              ... on AutomaticDiscountApplication {
-                title
-                allocationMethod
-                targetSelection
-                targetType
-                value {
-                  ... on MoneyV2 {
-                    amount
-                    currencyCode
-                  }
-                  ... on PricingPercentageValue {
-                    percentage
-                  }
-                }
-              }
-              ... on ManualDiscountApplication {
-                title
-                allocationMethod
-                value {
-                  ... on MoneyV2 {
-                    amount
-                    currencyCode
-                  }
-                  ... on PricingPercentageValue {
-                    percentage
-                  }
-                }
-              }
-            }
-          }
-          fulfillments(first: 250) {
-            id
-            status
-            trackingInfo {
-              company
-              number
-              url
-            }
-            createdAt
-            deliveredAt
-            estimatedDeliveryAt
-            inTransitAt
-            displayStatus
-            location {
-              id
-              name
-            }
-            originAddress {
-              address1
-              address2
-              city
-              provinceCode
-              countryCode
-              zip
-            }
-            fulfillmentLineItems(first: 250) {
-              nodes {
-                id
-                quantity
-                lineItem {
-                  id
-                  sku
-                  title
-                  variant {
-                    id
-                    sku
-                    title
-                  }
-                }
-              }
-            }
-          }
-          transactions(first: 250) {
-            id
-            kind
-            status
-            gateway
-            amountSet {
-              shopMoney {
-                amount
-                currencyCode
-              }
-              presentmentMoney {
-                amount
-                currencyCode
-              }
-            }
-            processedAt
-          }
-        }
-      }
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-    }
+function normalizeInventoryBehaviour(input) {
+  if (!input) return "BYPASS";
+
+  const normalized = String(input).toUpperCase().trim();
+
+  if (["BYPASS", "DEFERRED", "MESSAGE"].includes(normalized)) {
+    return normalized;
   }
-`;
+
+  console.warn(`   ⚠️ Invalid Inventory Behaviour in sheet: "${input}". Using BYPASS.`);
+  return "BYPASS";
+}
+
+/**
+ * Normalize many possible date formats into an ISO-8601 string accepted by Shopify.
+ * Handles:
+ * - JS Date objects
+ * - Excel serial numbers
+ * - "2025-12-02 00:29:15 -0500"
+ * - "2025-12-02 00:29:15 -05:00"
+ * - "2025-12-02 00:29:15"
+ * - Already ISO strings
+ * - Other parseable formats via new Date(...)
+ */
+function normalizeDateTime(val) {
+  if (val === null || val === undefined || val === "") return null;
+
+  // JS Date object
+  if (val instanceof Date) {
+    if (!isNaN(val.getTime())) return val.toISOString();
+    console.warn(`⚠️ Date object is invalid: ${val}`);
+    return null;
+  }
+
+  // Excel serial number (days since 1899-12-30 in Excel's system)
+  if (typeof val === "number") {
+    const excelEpoch = Date.UTC(1899, 11, 30); // 1899-12-30
+    const millis = Math.round(val * 24 * 60 * 60 * 1000);
+    const d = new Date(excelEpoch + millis);
+    if (!isNaN(d.getTime())) return d.toISOString();
+
+    console.warn(`⚠️ Could not normalize numeric date: ${val}`);
+    return null;
+  }
+
+  // Everything else: treat as string-like
+  if (typeof val !== "string") {
+    try {
+      const d = new Date(val);
+      if (!isNaN(d.getTime())) return d.toISOString();
+    } catch (_) { }
+    console.warn(`⚠️ Could not normalize non-string date: ${val}`);
+    return null;
+  }
+
+  const s = val.trim();
+  if (!s) return null;
+
+  // Already ISO-ish
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+    return s;
+  }
+
+  // "2025-12-02 00:29:15 -0500" → "2025-12-02T00:29:15-05:00"
+  let m = s.match(
+    /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s+([-+]\d{2})(\d{2})$/
+  );
+  if (m) {
+    const [, date, time, offH, offM] = m;
+    const offset = `${offH}:${offM}`;
+    return `${date}T${time}${offset}`;
+  }
+
+  // "2025-12-02 00:29:15 -05:00" → "2025-12-02T00:29:15-05:00"
+  m = s.match(
+    /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s+([-+]\d{2}:\d{2})$/
+  );
+  if (m) {
+    const [, date, time, offset] = m;
+    return `${date}T${time}${offset}`;
+  }
+
+  // "2025-12-02 00:29:15" → interpret as local time, convert to ISO
+  m = s.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})$/);
+  if (m) {
+    const isoLike = `${m[1]}T${m[2]}`;
+    const d = new Date(isoLike);
+    if (!isNaN(d.getTime())) return d.toISOString();
+  }
+
+  // Fallback: let JS try to parse it
+  try {
+    const d = new Date(s);
+    if (!isNaN(d.getTime())) return d.toISOString();
+  } catch (_) {}
+
+  console.warn(`⚠️ Could not normalize date: ${s}`);
+  return null;
+}
 
 /* ============================================
-   ORDER CREATE MUTATION
+   GQL QUERIES / MUTATIONS
 ============================================ */
+
 const ORDER_CREATE_MUTATION = `
   mutation orderCreate($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
     orderCreate(order: $order, options: $options) {
@@ -409,9 +212,6 @@ const ORDER_CREATE_MUTATION = `
   }
 `;
 
-/* ============================================
-   FULFILLMENT ORDERS QUERY (for holds + fulfillments)
-============================================ */
 const GET_FULFILLMENT_ORDERS_QUERY = `
   query getFulfillmentOrders($orderId: ID!) {
     order(id: $orderId) {
@@ -422,10 +222,6 @@ const GET_FULFILLMENT_ORDERS_QUERY = `
           node {
             id
             status
-            fulfillmentHolds {
-              reason
-              reasonNotes
-            }
             lineItems(first: 100) {
               edges {
                 node {
@@ -438,6 +234,8 @@ const GET_FULFILLMENT_ORDERS_QUERY = `
                     variantTitle
                     variant {
                       id
+                      sku
+                      title
                     }
                   }
                 }
@@ -450,9 +248,6 @@ const GET_FULFILLMENT_ORDERS_QUERY = `
   }
 `;
 
-/* ============================================
-   CREATE FULFILLMENT (V2)
-============================================ */
 const CREATE_FULFILLMENT_V2_MUTATION = `
   mutation fulfillmentCreateV2($fulfillment: FulfillmentV2Input!, $message: String) {
     fulfillmentCreateV2(fulfillment: $fulfillment, message: $message) {
@@ -469,59 +264,6 @@ const CREATE_FULFILLMENT_V2_MUTATION = `
   }
 `;
 
-/* ============================================
-   FULFILLMENT ORDER HOLD MUTATION
-============================================ */
-const FULFILLMENT_ORDER_HOLD_MUTATION = `
-  mutation FulfillmentOrderHold($fulfillmentHold: FulfillmentOrderHoldInput!, $id: ID!) {
-    fulfillmentOrderHold(fulfillmentHold: $fulfillmentHold, id: $id) {
-      fulfillmentOrder {
-        id
-        status
-      }
-      remainingFulfillmentOrder {
-        id
-        status
-      }
-      userErrors {
-        field
-        message
-      }
-    }
-  }
-`;
-
-/* ============================================
-   Helper: Build FO signature by SKU/variantTitle + remaining qty
-============================================ */
-function buildFulfillmentOrderSignature(foNode) {
-  const idCounts = new Map(); // identifier -> quantity
-
-  for (const foliEdge of foNode.lineItems.edges) {
-    const foli = foliEdge.node;
-
-    const sku = foli.lineItem.sku?.trim();
-    const variantTitle = foli.lineItem.variantTitle?.trim();
-    const title = foli.lineItem.title?.trim();
-
-    const identifier = sku || variantTitle || title;
-    if (!identifier) continue;
-
-    const rem = foli.remainingQuantity ?? 0;
-    idCounts.set(identifier, (idCounts.get(identifier) || 0) + rem);
-  }
-
-  if (idCounts.size === 0) return null;
-
-  return Array.from(idCounts.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([id, qty]) => `${id}:${qty}`)
-    .join("|");
-}
-
-/* ============================================
-   CHECK IF PRODUCT EXISTS IN TARGET
-============================================ */
 const CHECK_PRODUCT_QUERY = `
   query getProductByHandle($handle: String!) {
     productByHandle(handle: $handle) {
@@ -538,25 +280,6 @@ const CHECK_PRODUCT_QUERY = `
   }
 `;
 
-async function checkProductExists(handle) {
-  try {
-    const data = await graphqlRequest(
-      TARGET_GQL,
-      TARGET_ACCESS_TOKEN,
-      CHECK_PRODUCT_QUERY,
-      { handle },
-      `check product ${handle}`
-    );
-    return data.productByHandle;
-  } catch (err) {
-    return null;
-  }
-}
-
-
-/* ============================================
-   FETCH TARGET CUSTOMERS MAP
-============================================ */
 const TARGET_CUSTOMERS_QUERY = `
   query getCustomers($cursor: String) {
     customers(first: 250, after: $cursor) {
@@ -568,9 +291,9 @@ const TARGET_CUSTOMERS_QUERY = `
           firstName
           lastName
           companyContactProfiles {
-              company {
-                id
-                name
+            company {
+              id
+              name
             }
           }
         }
@@ -583,8 +306,90 @@ const TARGET_CUSTOMERS_QUERY = `
   }
 `;
 
+const TARGET_LOCATIONS_QUERY = `
+  query {
+    locations(first: 250) {
+      nodes {
+        id
+        name
+      }
+    }
+  }
+`;
+
+// Metafield definition create (for ORDER ownerType)
+const METAFIELD_DEFINITION_CREATE_MUTATION = `
+  mutation CreateMetafieldDefinition($definition: MetafieldDefinitionInput!) {
+    metafieldDefinitionCreate(definition: $definition) {
+      createdDefinition {
+        id
+        name
+        key
+        namespace
+        ownerType
+        type {
+          name
+          category
+        }
+      }
+      userErrors {
+        field
+        message
+        code
+      }
+    }
+  }
+`;
+
+const METAFIELD_DEFINITION_PIN_MUTATION = `
+  mutation metafieldDefinitionPin($definitionId: ID!) {
+    metafieldDefinitionPin(definitionId: $definitionId) {
+      pinnedDefinition {
+        id
+        name
+        key
+        namespace
+        pinnedPosition
+      }
+      userErrors {
+        field
+        message
+        code
+      }
+    }
+  }
+`;
+
+/* ============================================
+   TARGET HELPERS
+============================================ */
+
+async function checkProductExists(handle, productsCache) {
+  if (!handle) return null;
+
+  if (productsCache.has(handle)) {
+    return productsCache.get(handle);
+  }
+
+  try {
+    const data = await graphqlRequest(
+      TARGET_GQL,
+      TARGET_ACCESS_TOKEN,
+      CHECK_PRODUCT_QUERY,
+      { handle },
+      `check product ${handle}`,
+    );
+    const product = data.productByHandle || null;
+    productsCache.set(handle, product);
+    return product;
+  } catch (err) {
+    console.error(`   ❌ Product check failed for handle=${handle}: ${err.message}`);
+    return null;
+  }
+}
+
 async function fetchTargetCustomersMap() {
-  const map = new Map(); // email -> { customerId, companyId }
+  const map = new Map(); // email(lowercase) -> { customerId, companyId, companyName }
   let cursor = null;
 
   while (true) {
@@ -593,13 +398,13 @@ async function fetchTargetCustomersMap() {
       TARGET_ACCESS_TOKEN,
       TARGET_CUSTOMERS_QUERY,
       { cursor },
-      "fetch target customers"
+      "fetch target customers",
     );
 
     const edges = data.customers.edges;
     for (const edge of edges) {
       const customer = edge.node;
-      const company = customer.companyContactProfiles?.nodes?.[0]?.company;
+      const company = customer.companyContactProfiles?.company || null;
 
       if (!customer.email) continue;
 
@@ -617,110 +422,569 @@ async function fetchTargetCustomersMap() {
   return map;
 }
 
-/* ============================================
-   FETCH TARGET LOCATIONS (kept if needed later)
-============================================ */
-const TARGET_LOCATIONS_QUERY = `
-  query {
-    locations(first: 250) {
-      nodes {
-        id
-        name
-      }
-    }
-  }
-`;
-
 async function fetchTargetLocations() {
   const data = await graphqlRequest(
     TARGET_GQL,
     TARGET_ACCESS_TOKEN,
     TARGET_LOCATIONS_QUERY,
     {},
-    "fetch target locations"
+    "fetch target locations",
   );
   return data.locations?.nodes || [];
 }
 
 /* ============================================
-   Helper: compute total discount + code (from lineItems + applications)
+   METAFIELD DEFINITION HELPERS
 ============================================ */
-function getTotalDiscountAndCode(sourceOrder) {
-  let totalDiscount = 0;
-  let discountCurrency = sourceOrder.presentmentCurrencyCode || sourceOrder.currencyCode;
+function parseMetafieldHeader(headerName) {
+  if (typeof headerName !== "string") return null;
+  if (!headerName.startsWith("Metafield:")) return null;
 
-  // Sum line-item discount allocations
-  for (const li of sourceOrder.lineItems?.nodes || []) {
-    for (const alloc of li.discountAllocations || []) {
-      const amtStr =
-        alloc.allocatedAmountSet?.presentmentMoney?.amount ||
-        alloc.allocatedAmountSet?.shopMoney?.amount;
-      const cur =
-        alloc.allocatedAmountSet?.presentmentMoney?.currencyCode ||
-        alloc.allocatedAmountSet?.shopMoney?.currencyCode;
-      if (!amtStr) continue;
-      const parsed = parseFloat(amtStr);
-      if (!Number.isNaN(parsed)) {
-        totalDiscount += parsed;
-        if (cur) {
-          discountCurrency = cur;
+  const rest = headerName.replace("Metafield:", "").trim();
+
+  // extract type in square brackets
+  const typeMatch = rest.match(/\[(.+)\]\s*$/);
+  let type = null;
+  let main = rest;
+  if (typeMatch) {
+    type = typeMatch[1].trim();
+    main = rest.slice(0, typeMatch.index).trim();
+  }
+
+  const parts = main.split(".");
+  if (parts.length !== 2) return null;
+
+  const namespace = parts[0].trim();
+  const key = parts[1].trim();
+
+  if (!namespace || !key || !type) return null;
+
+  return {
+    namespace,
+    key,
+    type,
+    headerName,
+  };
+}
+
+async function pinExistingDefinition(namespace, key) {
+  const QUERY = `
+    query getDefinition($ownerType: MetafieldOwnerType!, $namespace: String!, $key: String!) {
+      metafieldDefinitions(ownerType: $ownerType, namespace: $namespace, key: $key, first: 1) {
+        nodes {
+          id
+          name
+          namespace
+          key
+          pinnedPosition
         }
       }
     }
+  `;
+
+  const data = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    QUERY,
+    { ownerType: "ORDER", namespace, key },
+    `fetch existing definition ${namespace}.${key}`
+  );
+
+  const def = data.metafieldDefinitions?.nodes?.[0];
+  if (!def) {
+    console.warn(`   ⚠️ Could not fetch existing definition for ${namespace}.${key}`);
+    return;
   }
 
-  // Fallback to order-level total discount if line-item sum is 0
-  if (!totalDiscount) {
-    const set = sourceOrder.currentTotalDiscountsSet;
-    const amtStr =
-      set?.presentmentMoney?.amount ||
-      set?.shopMoney?.amount;
-    const cur =
-      set?.presentmentMoney?.currencyCode ||
-      set?.shopMoney?.currencyCode ||
-      discountCurrency;
+  if (def.pinnedPosition !== null) {
+    console.log(`   📌 Already pinned: ${namespace}.${key}`);
+    return;
+  }
 
-    if (amtStr) {
-      const parsed = parseFloat(amtStr);
-      if (!Number.isNaN(parsed)) {
-        totalDiscount = parsed;
-        discountCurrency = cur;
+  const pinResult = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    METAFIELD_DEFINITION_PIN_MUTATION,
+    { definitionId: def.id },
+    `pin existing ${namespace}.${key}`
+  );
+
+  if (pinResult.metafieldDefinitionPin.userErrors?.length) {
+    console.warn(
+      `   ⚠️ Failed to pin existing definition ${namespace}.${key}:`,
+      pinResult.metafieldDefinitionPin.userErrors
+    );
+  } else {
+    console.log(`   📌 Successfully pinned existing definition ${namespace}.${key}`);
+  }
+}
+
+// Ensure each unique (namespace, key, type) for ORDER has a metafield definition
+async function ensureOrderMetafieldDefinitions(metafieldDefs) {
+  if (!metafieldDefs || metafieldDefs.length === 0) {
+    console.log("ℹ️ No metafield definitions detected from sheet.");
+    return;
+  }
+
+  console.log(
+    `🧱 Ensuring ${metafieldDefs.length} ORDER metafield definition(s) exist...`,
+  );
+
+  for (const def of metafieldDefs) {
+    const definitionInput = {
+      name: `${def.namespace}.${def.key}`,
+      key: def.key,
+      namespace: def.namespace,
+      ownerType: "ORDER",
+      type: def.type,
+      access: {
+        // admin: "MERCHANT_READ_WRITE",
+        storefront: "PUBLIC_READ",
+        customerAccount: "NONE"
+      },
+      capabilities: {
+        adminFilterable: { enabled: false },
+        smartCollectionCondition: { enabled: false },
+        uniqueValues: { enabled: false },
+      },
+    };
+
+    try {
+      const result = await graphqlRequest(
+        TARGET_GQL,
+        TARGET_ACCESS_TOKEN,
+        METAFIELD_DEFINITION_CREATE_MUTATION,
+        { definition: definitionInput },
+        `metafieldDefinitionCreate ${def.namespace}.${def.key}`,
+      );
+
+      const payload = result.metafieldDefinitionCreate;
+      if (payload.userErrors && payload.userErrors.length > 0) {
+
+        const alreadyExists = payload.userErrors.some(
+          (e) =>
+            e.code === "ALREADY_EXISTS" ||
+            e.code === "TAKEN" ||
+            (e.message && (
+              e.message.toLowerCase().includes("already exists") ||
+              e.message.toLowerCase().includes("key is in use")
+            ))
+        );
+
+        if (alreadyExists) {
+          console.log(
+            `   ℹ️ Metafield definition already exists: ${def.namespace}.${def.key}`,
+          );
+
+          // Try to fetch the definition ID and pin it
+          await pinExistingDefinition(def.namespace, def.key);
+          continue;
+        } else {
+          console.warn(
+            `   ⚠️ Could not create metafield definition ${def.namespace}.${def.key}:`,
+            payload.userErrors,
+          );
+        }
+      } else {
+        const created = payload.createdDefinition;
+        console.log(
+          `   ✅ Created metafield definition: ${created?.name || `${def.namespace}.${def.key}`
+          } (${def.type})`,
+        );
+        if (created?.id) {
+          console.log(`   📌 Pinning metafield definition ${created.name}...`);
+
+          const pinResult = await graphqlRequest(
+            TARGET_GQL,
+            TARGET_ACCESS_TOKEN,
+            METAFIELD_DEFINITION_PIN_MUTATION,
+            { definitionId: created.id },
+            `pin metafieldDefinition ${created.name}`
+          );
+
+          if (pinResult.metafieldDefinitionPin.userErrors?.length) {
+            console.warn(
+              `   ⚠️ Pinning issue for ${created.name}:`,
+              pinResult.metafieldDefinitionPin.userErrors
+            );
+          } else {
+            console.log(`   📌 Pinned ${created.name} successfully.`);
+          }
+        }
+
       }
+    } catch (err) {
+      console.error(
+        `   ❌ Error creating metafield definition ${def.namespace}.${def.key}: ${err.message}`,
+      );
     }
-  }
 
-  // Try to get a real discount code if present
-  let code = null;
-  for (const app of sourceOrder.discountApplications?.nodes || []) {
-    if (app.code) {
-      code = app.code;
-      break;
-    }
+    // small delay to avoid hammering metafieldDefinitionCreate
+    await new Promise((resolve) => setTimeout(resolve, 300));
   }
-  if (!code) {
-    code = "MIGRATED_DISCOUNT";
-  }
-
-  return { totalDiscount, discountCurrency, code };
 }
 
 /* ============================================
-   BUILD ORDER CREATE INPUT
+   FINANCIAL STATUS MAPPING
 ============================================ */
-function buildOrderCreateInput(sourceOrder, targetCustomerData, lineItems) {
+
+function mapFinancialStatus(paymentStatus) {
+  if (!paymentStatus) return null;
+  const s = String(paymentStatus).toLowerCase();
+  switch (s) {
+    case "paid":
+      return "PAID";
+    case "partially_refunded":
+      return "PARTIALLY_REFUNDED";
+    default:
+      return s.toUpperCase();
+  }
+}
+
+/* ============================================
+   EXCEL PARSING
+============================================ */
+
+function asBool(val) {
+  if (val === null || val === undefined || val === "") return null;
+  if (val === 1 || val === 1.0 || val === "1") return true;
+  if (val === 0 || val === 0.0 || val === "0") return false;
+  if (typeof val === "string") {
+    const s = val.toLowerCase();
+    if (s === "true" || s === "yes") return true;
+    if (s === "false" || s === "no") return false;
+  }
+  return Boolean(val);
+}
+
+function loadOrdersFromSheet(xlsxPath) {
+  console.log(`📂 Reading Excel: ${xlsxPath}`);
+  const workbook = XLSX.readFile(xlsxPath);
+  const sheetName =
+    workbook.SheetNames.includes("Orders")
+      ? "Orders"
+      : workbook.SheetNames[0];
+
+  const sheet = workbook.Sheets[sheetName];
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval: null });
+
+  if (!rows.length) {
+    throw new Error("Orders sheet has no rows");
+  }
+
+  console.log(`   ✅ Loaded ${rows.length} rows from "${sheetName}"`);
+
+  // Detect metafield columns and definitions from the header
+  const firstRow = rows[0];
+  const metafieldColumns = new Map(); // columnName -> { namespace, key, type, headerName }
+  const metafieldDefinitionMap = new Map(); // "ORDER|namespace|key|type" -> { namespace, key, type }
+
+  for (const colName of Object.keys(firstRow)) {
+    const parsed = parseMetafieldHeader(colName);
+    if (!parsed) continue;
+
+    metafieldColumns.set(colName, parsed);
+
+    const defKey = `ORDER|${parsed.namespace}|${parsed.key}|${parsed.type}`;
+    if (!metafieldDefinitionMap.has(defKey)) {
+      metafieldDefinitionMap.set(defKey, {
+        namespace: parsed.namespace,
+        key: parsed.key,
+        type: parsed.type,
+      });
+    }
+  }
+
+  if (metafieldColumns.size > 0) {
+    console.log(
+      `   🧾 Detected ${metafieldColumns.size} metafield column(s) in sheet`,
+    );
+  } else {
+    console.log("   ℹ️ No metafield columns detected in sheet headers");
+  }
+
+  // Group rows by ID (order id)
+  const groups = new Map();
+  for (const row of rows) {
+    const id = row["ID"];
+    if (!id) continue;
+    if (!groups.has(id)) groups.set(id, []);
+    groups.get(id).push(row);
+  }
+
+  console.log(`   ✅ Found ${groups.size} distinct orders in sheet`);
+
+  const parsedOrders = [];
+
+  for (const [orderId, groupRows] of groups.entries()) {
+    const first = groupRows[0];
+
+    const email = first["Email"] || first["Customer: Email"] || null;
+
+    const createdAtRaw = first["Created At"] || null;
+    const createdAt = normalizeDateTime(createdAtRaw);
+
+    const currency = first["Currency"] || null;
+    const tagsRaw = first["Tags"] || "";
+    const taxesIncluded = !!(first["Tax: Included"] || 0);
+    const paymentStatus = first["Payment: Status"] || null;
+
+    const sendReceiptRaw = first["Send Receipt"];
+    const inventoryBehaviourRaw = first["Inventory Behaviour"];
+
+    const sendReceipt = asBool(sendReceiptRaw) === true;
+    const inventoryBehaviour = normalizeInventoryBehaviour(inventoryBehaviourRaw);
+
+    const tags = tagsRaw
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    // Billing
+    const billing = {
+      firstName: first["Billing: First Name"] || null,
+      lastName: first["Billing: Last Name"] || null,
+      address1: first["Billing: Address 1"] || null,
+      address2: first["Billing: Address 2"] || null,
+      city: first["Billing: City"] || null,
+      provinceCode: first["Billing: Province Code"] || null,
+      countryCode: first["Billing: Country Code"] || null,
+      zip: first["Billing: Zip"] != null ? String(first["Billing: Zip"]) : null,
+      company: first["Billing: Company"] || null,
+      phone: first["Billing: Phone"] || null,
+    };
+
+    // Shipping
+    const shipping = {
+      firstName: first["Shipping: First Name"] || null,
+      lastName: first["Shipping: Last Name"] || null,
+      address1: first["Shipping: Address 1"] || null,
+      address2: first["Shipping: Address 2"] || null,
+      city: first["Shipping: City"] || null,
+      provinceCode: first["Shipping: Province Code"] || null,
+      countryCode: first["Shipping: Country Code"] || null,
+      zip: first["Shipping: Zip"] != null ? String(first["Shipping: Zip"]) : null,
+      company: first["Shipping: Company"] || null,
+      phone: first["Shipping: Phone"] || null,
+    };
+
+    // Line items
+    const lineItems = [];
+    for (const r of groupRows.filter((r) => r["Line: Type"] === "Line Item")) {
+      const qtyRaw = r["Line: Quantity"];
+      const qty = qtyRaw != null ? Number(qtyRaw) : 0;
+      const priceRaw = r["Line: Price"];
+      const discountRaw = r["Line: Discount"];
+
+      const requiresShippingRaw = r["Line: Requires Shipping"];
+      const taxableRaw = r["Line: Taxable"];
+
+      lineItems.push({
+        productHandle: r["Line: Product Handle"] || null,
+        sku: r["Line: SKU"] || r["Line: Variant SKU"] || null,
+        variantTitle: r["Line: Variant Title"] || null,
+        title: r["Line: Title"] || null,
+        quantity: qty,
+        price: priceRaw != null ? Number(priceRaw) : 0,
+        discountTotal: discountRaw != null ? Number(discountRaw) : 0,
+        fulfillmentStatus: r["Line: Fulfillment Status"] || null,
+        requiresShipping: asBool(requiresShippingRaw),
+        taxable: asBool(taxableRaw),
+      });
+    }
+
+    // Shipping lines
+    const shippingLines = [];
+    for (const r of groupRows.filter((r) => r["Line: Type"] === "Shipping Line")) {
+      const priceRaw = r["Line: Price"];
+      if (priceRaw == null) continue;
+      const price = Number(priceRaw);
+      const title = r["Line: Title"] || "Shipping";
+      shippingLines.push({ title, price });
+    }
+
+    // Discounts rows
+    const discountRows = groupRows.filter((r) => r["Line: Type"] === "Discount");
+
+    // Amount: single totalDiscount equal to abs(sum of all discount rows)
+    let sheetDiscountTotal = 0;
+    for (const dr of discountRows) {
+      let amt = dr["Line: Discount"];
+      if (amt === null || amt === undefined) {
+        if (dr["Line: Total"] !== null && dr["Line: Total"] !== undefined) {
+          amt = dr["Line: Total"];
+        } else if (dr["Line: Amount"] !== null && dr["Line: Amount"] !== undefined) {
+          amt = dr["Line: Amount"];
+        } else if (dr["Line: Price"] !== null && dr["Line: Price"] !== undefined) {
+          amt = dr["Line: Price"];
+        } else {
+          amt = 0;
+        }
+      }
+      sheetDiscountTotal += Number(amt || 0);
+    }
+
+    const totalDiscount = Math.abs(sheetDiscountTotal);
+
+    // Label: combined discount names -> "CODE1, CODE2"
+    const discountNames = discountRows
+      .map((r) =>
+        r["Line: Name"] ||
+        r["Line: Title"] ||
+        r["Line: Type"] ||
+        null
+      )
+      .filter(Boolean);
+
+    let discountLabel = "MIGRATED_DISCOUNT";
+    if (discountNames.length === 1) {
+      discountLabel = discountNames[0];
+    } else if (discountNames.length > 1) {
+      discountLabel = discountNames.join(", ");
+    }
+
+    // Transactions
+    const transactions = [];
+    for (const r of groupRows.filter(
+      (r) => r["Line: Type"] === "Transaction",
+    )) {
+      const amount = r["Transaction: Amount"];
+      const shopAmount = r["Transaction: Shop Currency Amount"];
+      if (amount == null && shopAmount == null) continue;
+
+      const txProcessedRaw = r["Transaction: Processed At"] || null;
+      const txProcessedAt = normalizeDateTime(txProcessedRaw);
+
+      transactions.push({
+        kind: r["Transaction: Kind"]
+          ? String(r["Transaction: Kind"]).toUpperCase()
+          : null,
+        status: r["Transaction: Status"]
+          ? String(r["Transaction: Status"]).toUpperCase()
+          : null,
+        gateway: r["Transaction: Gateway"] || null,
+        amount: amount != null ? Math.abs(Number(amount)) : null,
+        currency: r["Transaction: Currency"] || null,
+        shopAmount: shopAmount != null ? Math.abs(Number(shopAmount)) : null,
+        shopCurrency: r["Transaction: Shop Currency"] || null,
+        test: asBool(r["Transaction: Test"]),
+        processedAt: txProcessedAt, // normalized or null
+      });
+    }
+
+    // Fulfillment desired quantities
+    const orderFulfillmentStatus = first["Order Fulfillment Status"] || null;
+    const desiredBySku = {};
+    const desiredByVariantTitle = {};
+
+    for (const li of lineItems) {
+      const status = li.fulfillmentStatus;
+      if (!status || typeof status !== "string") continue;
+      if (status.toLowerCase() !== "fulfilled") continue;
+
+      const qty = li.quantity || 0;
+      if (qty <= 0) continue;
+
+      if (li.sku && String(li.sku).trim()) {
+        const key = String(li.sku).trim();
+        desiredBySku[key] = (desiredBySku[key] || 0) + qty;
+      } else if (li.variantTitle && String(li.variantTitle).trim()) {
+        const key = String(li.variantTitle).trim();
+        desiredByVariantTitle[key] =
+          (desiredByVariantTitle[key] || 0) + qty;
+      }
+    }
+
+    // Order-level metafields: one value per metafield column from first row
+    const metafields = [];
+    for (const [colName, mfDef] of metafieldColumns.entries()) {
+      const rawVal = first[colName];
+      if (rawVal === null || rawVal === undefined || rawVal === "") continue;
+
+      metafields.push({
+        namespace: mfDef.namespace,
+        key: mfDef.key,
+        type: mfDef.type,
+        value: String(rawVal),
+      });
+    }
+
+    parsedOrders.push({
+      sourceId: orderId,
+      name: first["Name"] || null,
+      email,
+      createdAt,
+      currency,
+      tags,
+      taxesIncluded,
+      paymentStatus,
+      billing,
+      shipping,
+      lineItems,
+      shippingLines,
+      totalDiscount,
+      discountLabel,
+      transactions,
+      orderFulfillmentStatus,
+      desiredBySku,
+      desiredByVariantTitle,
+      sendReceipt,
+      inventoryBehaviour,
+      metafields,
+    });
+  }
+
+  const metafieldDefinitions = Array.from(metafieldDefinitionMap.values());
+
+  return {
+    parsedOrders,
+    metafieldDefinitions,
+  };
+}
+
+/* ============================================
+   ORDER BUILDING FROM PARSED DATA
+============================================ */
+
+function buildOrderCreateInputFromParsed(parsedOrder, targetCustomerData) {
+  const {
+    email,
+    createdAt,
+    currency,
+    tags,
+    taxesIncluded,
+    paymentStatus,
+    billing,
+    shipping,
+    lineItems,
+    shippingLines,
+    totalDiscount,
+    discountLabel,
+    transactions,
+    metafields,
+  } = parsedOrder;
+
   const order = {
-    email: sourceOrder.email,
-    currency: sourceOrder.currencyCode,
-    presentmentCurrency: sourceOrder.presentmentCurrencyCode || sourceOrder.currencyCode,
-    processedAt: sourceOrder.processedAt || sourceOrder.createdAt,
-    note: sourceOrder.note,
-    tags: [...(sourceOrder.tags || []), "migrated"],
-    taxesIncluded: sourceOrder.taxesIncluded || false,
+    email,
+    currency,
+    presentmentCurrency: currency,
+    taxesIncluded: !!taxesIncluded,
+    note: null,
     test: false,
   };
 
-  // Customer assignment (B2C style only – no purchasingEntity)
-  if (targetCustomerData) {
+  // Only set processedAt if we have a valid normalized date
+  if (createdAt) {
+    order.processedAt = createdAt;
+  }
+
+  // Tags
+  const finalTags = [...(tags || [])];
+  finalTags.push("migrated-from-sheet");
+  order.tags = finalTags;
+
+  // Customer (associate by email)
+  if (targetCustomerData?.customerId) {
     order.customer = {
       toAssociate: {
         id: targetCustomerData.customerId,
@@ -729,52 +993,49 @@ function buildOrderCreateInput(sourceOrder, targetCustomerData, lineItems) {
   }
 
   // Billing address
-  if (sourceOrder.billingAddress) {
-    const ba = sourceOrder.billingAddress;
+  if (billing) {
     order.billingAddress = {
-      firstName: ba.firstName,
-      lastName: ba.lastName,
-      address1: ba.address1,
-      address2: ba.address2,
-      city: ba.city,
-      provinceCode: ba.provinceCode,
-      countryCode: ba.countryCode,
-      zip: ba.zip,
-      company: ba.company,
-      phone: ba.phone,
+      firstName: billing.firstName || undefined,
+      lastName: billing.lastName || undefined,
+      address1: billing.address1 || undefined,
+      address2: billing.address2 || undefined,
+      city: billing.city || undefined,
+      provinceCode: billing.provinceCode || undefined,
+      countryCode: billing.countryCode || undefined,
+      zip: billing.zip || undefined,
+      company: billing.company || undefined,
+      phone: billing.phone || undefined,
     };
   }
 
   // Shipping address
-  if (sourceOrder.shippingAddress) {
-    const sa = sourceOrder.shippingAddress;
+  if (shipping) {
     order.shippingAddress = {
-      firstName: sa.firstName,
-      lastName: sa.lastName,
-      address1: sa.address1,
-      address2: sa.address2,
-      city: sa.city,
-      provinceCode: sa.provinceCode,
-      countryCode: sa.countryCode,
-      zip: sa.zip,
-      company: sa.company,
-      phone: sa.phone,
+      firstName: shipping.firstName || undefined,
+      lastName: shipping.lastName || undefined,
+      address1: shipping.address1 || undefined,
+      address2: shipping.address2 || undefined,
+      city: shipping.city || undefined,
+      provinceCode: shipping.provinceCode || undefined,
+      countryCode: shipping.countryCode || undefined,
+      zip: shipping.zip || undefined,
+      company: shipping.company || undefined,
+      phone: shipping.phone || undefined,
     };
   }
 
-  // Line items (net discounted prices)
+  // Line items are added later (when variants are resolved)
   order.lineItems = lineItems;
 
-  // Aggregate all discounts and apply as a single itemFixedDiscountCode
-  const { totalDiscount, discountCurrency, code } = getTotalDiscountAndCode(sourceOrder);
+  // Discounts: single itemFixedDiscountCode based on totalDiscount
   if (totalDiscount && totalDiscount > 0) {
     order.discountCode = {
       itemFixedDiscountCode: {
-        code,
+        code: discountLabel || "MIGRATED_DISCOUNT",
         amountSet: {
           shopMoney: {
             amount: totalDiscount,
-            currencyCode: discountCurrency,
+            currencyCode: currency,
           },
         },
       },
@@ -782,74 +1043,96 @@ function buildOrderCreateInput(sourceOrder, targetCustomerData, lineItems) {
   }
 
   // Shipping lines
-  const shippingLine = sourceOrder.shippingLines?.nodes?.[0];
-  if (shippingLine) {
-    const shippingPrice =
-      shippingLine.originalPriceSet?.presentmentMoney?.amount ||
-      shippingLine.originalPriceSet?.shopMoney?.amount ||
-      "0";
-
-    order.shippingLines = [
-      {
-        title: shippingLine.title,
-        priceSet: {
-          shopMoney: {
-            amount: parseFloat(shippingPrice),
-            currencyCode: sourceOrder.currencyCode,
-          },
-        },
-      },
-    ];
-  }
-
-  // Financial status & transactions
-  order.financialStatus = sourceOrder.displayFinancialStatus;
-  if (sourceOrder.fullyPaid) {
-    order.transactions = (sourceOrder.transactions || []).map((transaction) => ({
-      kind: transaction.kind,
-      status: transaction.status,
-      gateway: transaction.gateway || "manual",
-      amountSet: {
+  if (shippingLines && shippingLines.length > 0) {
+    order.shippingLines = shippingLines.map((sl) => ({
+      title: sl.title || "Shipping",
+      priceSet: {
         shopMoney: {
-          amount: transaction.amountSet.shopMoney.amount,
-          currencyCode: transaction.amountSet.shopMoney.currencyCode,
-        },
-        presentmentMoney: {
-          amount: transaction.amountSet.presentmentMoney.amount,
-          currencyCode: transaction.amountSet.presentmentMoney.currencyCode,
+          amount: sl.price || 0,
+          currencyCode: currency,
         },
       },
-      processedAt:
-        transaction.processedAt ||
-        sourceOrder.processedAt ||
-        sourceOrder.createdAt,
     }));
   }
 
-  // No inline fulfillment here – all fulfillment / holds are mirrored later via v2 mutations
+  // Financial status
+  const financialStatus = mapFinancialStatus(paymentStatus);
+  if (financialStatus) {
+    order.financialStatus = financialStatus;
+  }
+
+  // Transactions
+  if (transactions && transactions.length > 0) {
+    order.transactions = transactions.map((tx) => {
+      const shopAmount =
+        tx.shopAmount != null ? tx.shopAmount : tx.amount || 0;
+      const presentmentAmount =
+        tx.amount != null ? tx.amount : tx.shopAmount || 0;
+
+      const txInput = {
+        kind: tx.kind || "CAPTURE",
+        status: tx.status || "SUCCESS",
+        gateway: tx.gateway || "manual",
+        amountSet: {
+          shopMoney: {
+            amount: shopAmount,
+            currencyCode: tx.shopCurrency || currency,
+          },
+          presentmentMoney: {
+            amount: presentmentAmount,
+            currencyCode: tx.currency || currency,
+          },
+        },
+        test: tx.test === true,
+      };
+
+      // processedAt: prefer tx.processedAt if valid, else fallback to createdAt
+      const txProcessed =
+        normalizeDateTime(tx.processedAt) || createdAt || null;
+      if (txProcessed) {
+        txInput.processedAt = txProcessed;
+      }
+
+      return txInput;
+    });
+  }
+
+  // Metafields (order-level)
+  if (metafields && metafields.length > 0) {
+    order.metafields = metafields.map((mf) => ({
+      namespace: mf.namespace,
+      key: mf.key,
+      type: mf.type,
+      value: mf.value,
+    }));
+  }
 
   return order;
 }
 
 /* ============================================
-   MIGRATE SINGLE ORDER
+   MIGRATE SINGLE PARSED ORDER
 ============================================ */
-async function migrateOrder(sourceOrder, customersMap, productsCache) {
-  console.log(`\n▶ Migrating order: ${sourceOrder.name}`);
-  console.log(`   📧 Customer: ${sourceOrder.email || "No email"}`);
+
+async function migrateParsedOrder(parsedOrder, customersMap, productsCache) {
   console.log(
-    `   💰 Total: ${sourceOrder.totalPriceSet.presentmentMoney.amount} ${sourceOrder.totalPriceSet.presentmentMoney.currencyCode}`
+    `\n▶ Migrating order from sheet: ${parsedOrder.name} (ID=${parsedOrder.sourceId})`,
   );
-  console.log(`   💳 Payment: ${sourceOrder.displayFinancialStatus}`);
-  console.log(`   📦 Fulfillment: ${sourceOrder.displayFulfillmentStatus}`);
+  console.log(`   📧 Customer: ${parsedOrder.email || "No email"}`);
+  console.log(`   💳 Payment: ${parsedOrder.paymentStatus || "unknown"}`);
+  console.log(
+    `   📦 Fulfillment Status: ${parsedOrder.orderFulfillmentStatus || "unknown"
+    }`,
+  );
 
   // 1. Customer mapping
-  const targetCustomerData = sourceOrder.email
-    ? customersMap.get(sourceOrder.email.toLowerCase())
-    : null;
+  const targetCustomerData =
+    parsedOrder.email
+      ? customersMap.get(parsedOrder.email.toLowerCase())
+      : null;
 
   if (!targetCustomerData) {
-    console.warn(`   ⚠️  Customer not found: ${sourceOrder.email}`);
+    console.warn(`   ⚠️  Customer not found in target: ${parsedOrder.email}`);
     return { success: false, reason: "customer_not_found" };
   }
 
@@ -858,41 +1141,36 @@ async function migrateOrder(sourceOrder, customersMap, productsCache) {
     console.log(`   🏢 Company: ${targetCustomerData.companyName}`);
   }
 
-  // 2. Map products/variants
-  const lineItems = [];
+  // 2. Map products/variants + build GraphQL lineItems
+  const lineItemsInput = [];
   const missingProducts = [];
 
-  for (const lineItem of sourceOrder.lineItems.nodes) {
-    const productHandle = lineItem.variant?.product?.handle;
-    const sourceSku = lineItem.variant?.sku;
-    const sourceVariantTitle = lineItem.variant?.title || lineItem.variant?.displayName;
+  for (const li of parsedOrder.lineItems) {
+    const productHandle = li.productHandle;
+    const sourceSku = li.sku || null;
+    const sourceVariantTitle = li.variantTitle || null;
 
     if (!productHandle) {
-      console.warn(`   ⚠️  Missing product: ${lineItem.title}`);
-      missingProducts.push(lineItem.title);
+      console.warn(`   ⚠️  Missing product handle for line "${li.title}"`);
+      missingProducts.push(li.title || "UNKNOWN");
       continue;
     }
 
-    let targetProduct = productsCache.get(productHandle);
+    const targetProduct = await checkProductExists(productHandle, productsCache);
     if (!targetProduct) {
-      targetProduct = await checkProductExists(productHandle);
-      if (targetProduct) {
-        productsCache.set(productHandle, targetProduct);
-      }
-    }
-
-    if (!targetProduct) {
-      console.warn(`   ⚠️  Product not found: ${productHandle}`);
+      console.warn(`   ⚠️  Product not found in target: ${productHandle}`);
       missingProducts.push(productHandle);
       continue;
     }
 
-    // Match variant: SKU → title → first
+    // Match variant: SKU → title/displayName → fallback first
     let targetVariantId = null;
     let matchMethod = null;
 
     if (sourceSku) {
-      const match = targetProduct.variants.nodes.find((v) => v.sku === sourceSku);
+      const match = targetProduct.variants.nodes.find(
+        (v) => v.sku === sourceSku,
+      );
       if (match) {
         targetVariantId = match.id;
         matchMethod = "SKU";
@@ -901,7 +1179,9 @@ async function migrateOrder(sourceOrder, customersMap, productsCache) {
 
     if (!targetVariantId && sourceVariantTitle) {
       const match = targetProduct.variants.nodes.find(
-        (v) => v.title === sourceVariantTitle || v.displayName === sourceVariantTitle
+        (v) =>
+          v.title === sourceVariantTitle ||
+          v.displayName === sourceVariantTitle,
       );
       if (match) {
         targetVariantId = match.id;
@@ -912,64 +1192,71 @@ async function migrateOrder(sourceOrder, customersMap, productsCache) {
     if (!targetVariantId && targetProduct.variants.nodes.length > 0) {
       targetVariantId = targetProduct.variants.nodes[0].id;
       matchMethod = "Fallback";
-      console.warn(`   ⚠️  Using first variant for ${productHandle}`);
+      console.warn(
+        `   ⚠️  Using first variant for product handle=${productHandle}`,
+      );
     }
 
     if (!targetVariantId) {
-      console.warn(`   ⚠️  No variant: ${productHandle}`);
+      console.warn(
+        `   ⚠️  No variant matched for product handle=${productHandle}`,
+      );
       missingProducts.push(productHandle);
       continue;
     }
 
-    // Use discounted price to preserve all discounts
-    const priceStr =
-      lineItem.discountedUnitPriceSet?.presentmentMoney?.amount ||
-      lineItem.originalUnitPriceSet?.presentmentMoney?.amount ||
-      "0";
-    const price = parseFloat(priceStr);
+    const unitPrice = li.price || 0;
 
-    const lineItemInput = {
-      variantId: targetVariantId,
-      quantity: lineItem.quantity,
-      priceSet: {
-        shopMoney: {
-          amount: price,
-          currencyCode: sourceOrder.currencyCode,
-        },
-      },
-      requiresShipping: lineItem.requiresShipping,
-      taxable: lineItem.taxable,
-    };
-
-    if (lineItem.customAttributes?.length) {
-      lineItemInput.customAttributes = lineItem.customAttributes.map((attr) => ({
-        key: attr.key,
-        value: attr.value,
-      }));
+    let requiresShipping = li.requiresShipping;
+    if (requiresShipping === null || requiresShipping === undefined) {
+      requiresShipping = true; // default if missing
     }
 
-    lineItems.push(lineItemInput);
+    let taxable = li.taxable;
+    if (taxable === null || taxable === undefined) {
+      taxable = true; // default if missing
+    }
+
+    const lineInput = {
+      variantId: targetVariantId,
+      quantity: li.quantity || 0,
+      priceSet: {
+        shopMoney: {
+          amount: unitPrice,
+          currencyCode: parsedOrder.currency,
+        },
+      },
+      requiresShipping,
+      taxable,
+    };
+
+    lineItemsInput.push(lineInput);
     console.log(
-      `   ✅ [${matchMethod}]: ${lineItem.title} (${price} ${sourceOrder.currencyCode})`
+      `   ✅ [${matchMethod}] ${li.title} x${li.quantity} @ ${unitPrice} ${parsedOrder.currency} (requiresShipping=${requiresShipping}, taxable=${taxable})`,
     );
   }
 
   if (missingProducts.length > 0) {
-    console.error(`   ❌ Missing products: ${missingProducts.join(", ")}`);
+    console.error(
+      `   ❌ Missing products or variants: ${missingProducts.join(", ")}`,
+    );
     return { success: false, reason: "products_missing", missing: missingProducts };
   }
 
-  if (lineItems.length === 0) {
-    console.error("   ❌ No line items");
+  if (lineItemsInput.length === 0) {
+    console.error("   ❌ No line items to migrate");
     return { success: false, reason: "no_line_items" };
   }
 
   // 3. Build order input
-  const orderInput = buildOrderCreateInput(sourceOrder, targetCustomerData, lineItems);
+  const orderInput = buildOrderCreateInputFromParsed(
+    { ...parsedOrder, lineItems: lineItemsInput },
+    targetCustomerData,
+  );
 
   // 4. Create order
   try {
-    console.log("   📝 Creating order...");
+    console.log("   📝 Creating order via orderCreate...");
 
     const result = await graphqlRequest(
       TARGET_GQL,
@@ -978,16 +1265,19 @@ async function migrateOrder(sourceOrder, customersMap, productsCache) {
       {
         order: orderInput,
         options: {
-          inventoryBehaviour: "BYPASS",
-          sendReceipt: false,
+          inventoryBehaviour: normalizeInventoryBehaviour(parsedOrder.inventoryBehaviour),
+          sendReceipt: parsedOrder.sendReceipt === true,
           sendFulfillmentReceipt: false,
         },
       },
-      `create order ${sourceOrder.name}`
+      `create order ${parsedOrder.name}`,
     );
 
     if (result.orderCreate.userErrors?.length) {
-      console.error("   ❌ Order creation errors:", result.orderCreate.userErrors);
+      console.error(
+        "   ❌ Order creation errors:",
+        result.orderCreate.userErrors,
+      );
       return {
         success: false,
         reason: "order_create_error",
@@ -1001,294 +1291,187 @@ async function migrateOrder(sourceOrder, customersMap, productsCache) {
 
     console.log(`   ✅ Order created: ${newOrderName} (${newOrderId})`);
     console.log(`   💳 Financial: ${order.displayFinancialStatus}`);
+    console.log(`   📦 Fulfillment: ${order.displayFulfillmentStatus}`);
     console.log(
-      `   📦 Fulfillment: ${order.displayFulfillmentStatus}`
-    );
-    console.log(
-      `   💰 Total: ${order.totalPriceSet.shopMoney.amount} ${order.totalPriceSet.shopMoney.currencyCode}`
+      `   💰 Total: ${order.totalPriceSet.shopMoney.amount} ${order.totalPriceSet.shopMoney.currencyCode}`,
     );
 
     /* --------------------------------------------
-       Mirror FULFILLMENT HOLDS (source → target)
+       Mirror FULFILLMENTS (based on sheet)
     --------------------------------------------- */
+    const hasDesiredFulfill =
+      (parsedOrder.desiredBySku &&
+        Object.keys(parsedOrder.desiredBySku).length > 0) ||
+      (parsedOrder.desiredByVariantTitle &&
+        Object.keys(parsedOrder.desiredByVariantTitle).length > 0);
+
+    if (!hasDesiredFulfill) {
+      console.log(
+        "   📦 No line-level fulfillment info in sheet to mirror",
+      );
+      return {
+        success: true,
+        orderId: newOrderId,
+        orderName: newOrderName,
+        sourceOrderName: parsedOrder.name,
+      };
+    }
+
+    console.log(
+      "   📊 Desired quantities to fulfill (by SKU):",
+      parsedOrder.desiredBySku,
+    );
+    console.log(
+      "   📊 Desired quantities to fulfill (by Variant Title):",
+      parsedOrder.desiredByVariantTitle,
+    );
+
     try {
-      const sourceFOData = await graphqlRequest(
-        SOURCE_GQL,
-        SOURCE_ACCESS_TOKEN,
+      const fulfillmentOrdersData = await graphqlRequest(
+        TARGET_GQL,
+        TARGET_ACCESS_TOKEN,
         GET_FULFILLMENT_ORDERS_QUERY,
-        { orderId: sourceOrder.id },
-        `get source fulfillment orders for ${sourceOrder.name}`
+        { orderId: newOrderId },
+        `get fulfillment orders for ${newOrderName}`,
       );
 
-      const sourceFOEdges = sourceFOData.order?.fulfillmentOrders?.edges || [];
-      const sourceHoldFOs = [];
+      const fulfillmentOrderEdges =
+        fulfillmentOrdersData.order?.fulfillmentOrders?.edges || [];
 
-      for (const edge of sourceFOEdges) {
-        const fo = edge.node;
-        if (!fo.fulfillmentHolds?.length) continue;
-
-        const lastHold = fo.fulfillmentHolds[fo.fulfillmentHolds.length - 1];
-        const reason = lastHold.reason || "OTHER";
-        const reasonNotes =
-          lastHold.reasonNotes || `Migrated hold from ${sourceOrder.name}`;
-
-        const sig = buildFulfillmentOrderSignature(fo);
-        if (!sig) continue;
-
-        sourceHoldFOs.push({ sig, reason, reasonNotes });
-      }
-
-      if (sourceHoldFOs.length === 0) {
-        console.log("   📌 No fulfillment holds to mirror");
+      if (!fulfillmentOrderEdges.length) {
+        console.warn(
+          "   ⚠️  No fulfillment orders found in target (cannot mirror fulfillments)",
+        );
       } else {
         console.log(
-          `   📌 Found ${sourceHoldFOs.length} source fulfillment order(s) with holds`
+          `   📋 Found ${fulfillmentOrderEdges.length} fulfillment order(s) in target`,
         );
 
-        const targetFOData = await graphqlRequest(
-          TARGET_GQL,
-          TARGET_ACCESS_TOKEN,
-          GET_FULFILLMENT_ORDERS_QUERY,
-          { orderId: newOrderId },
-          `get target fulfillment orders for ${newOrderName}`
-        );
+        const desiredBySku = { ...(parsedOrder.desiredBySku || {}) };
+        const desiredByVariantTitle = {
+          ...(parsedOrder.desiredByVariantTitle || {}),
+        };
 
-        const targetFOEdges = targetFOData.order?.fulfillmentOrders?.edges || [];
-        const targetFoMap = new Map();
+        const lineItemsByFulfillmentOrder = [];
 
-        for (const edge of targetFOEdges) {
-          const fo = edge.node;
-          const sig = buildFulfillmentOrderSignature(fo);
-          if (sig && !targetFoMap.has(sig)) {
-            targetFoMap.set(sig, fo);
+        for (const foEdge of fulfillmentOrderEdges) {
+          const fo = foEdge.node;
+          const foId = fo.id;
+          const foItems = [];
+
+          for (const foliEdge of fo.lineItems.edges) {
+            const foli = foliEdge.node;
+            const remaining = foli.remainingQuantity ?? 0;
+            if (remaining <= 0) continue;
+
+            const targetSku = foli.lineItem.sku || null;
+            const targetVariantTitle =
+              foli.lineItem.variantTitle || foli.lineItem.title || null;
+
+            let desired = 0;
+            let keyType = null;
+
+            if (targetSku && desiredBySku[targetSku]) {
+              desired = desiredBySku[targetSku];
+              keyType = "sku";
+            } else if (
+              targetVariantTitle &&
+              desiredByVariantTitle[targetVariantTitle]
+            ) {
+              desired = desiredByVariantTitle[targetVariantTitle];
+              keyType = "variantTitle";
+            }
+
+            if (!desired) continue;
+
+            const qtyToFulfill = Math.min(desired, remaining);
+            if (qtyToFulfill <= 0) continue;
+
+            foItems.push({
+              id: foli.id,
+              quantity: qtyToFulfill,
+            });
+
+            if (keyType === "sku") {
+              const newRemaining = desired - qtyToFulfill;
+              if (newRemaining > 0) {
+                desiredBySku[targetSku] = newRemaining;
+              } else {
+                delete desiredBySku[targetSku];
+              }
+            } else if (keyType === "variantTitle") {
+              const newRemaining = desired - qtyToFulfill;
+              if (newRemaining > 0) {
+                desiredByVariantTitle[targetVariantTitle] = newRemaining;
+              } else {
+                delete desiredByVariantTitle[targetVariantTitle];
+              }
+            }
+
+            console.log(
+              `      ✅ Match for FO ${foId}: FOLI=${foli.id}, qty=${qtyToFulfill}, sku=${targetSku}, variantTitle=${targetVariantTitle}`,
+            );
+          }
+
+          if (foItems.length > 0) {
+            lineItemsByFulfillmentOrder.push({
+              fulfillmentOrderId: foId,
+              fulfillmentOrderLineItems: foItems,
+            });
           }
         }
 
-        for (const srcHold of sourceHoldFOs) {
-          const targetFo = targetFoMap.get(srcHold.sig);
-          if (!targetFo) {
-            console.warn(
-              `   ⚠️  No matching target FO found for hold signature: ${srcHold.sig}`
-            );
-            continue;
-          }
-
-          const fulfillmentHold = {
-            reason: srcHold.reason,
-            reasonNotes: srcHold.reasonNotes,
+        if (!lineItemsByFulfillmentOrder.length) {
+          console.warn(
+            "   ⚠️  No fulfillable items found in target for desired quantities",
+          );
+        } else {
+          const fulfillmentInput = {
+            notifyCustomer: false,
+            lineItemsByFulfillmentOrder,
           };
 
           console.log(
-            `   ⏸️  Applying hold to target FO ${targetFo.id} (reason=${srcHold.reason})`
+            `   🚀 Creating fulfillment via fulfillmentCreateV2 with ${lineItemsByFulfillmentOrder.length} FO group(s)...`,
           );
 
-          const holdResult = await graphqlRequest(
+          const fulfillmentResult = await graphqlRequest(
             TARGET_GQL,
             TARGET_ACCESS_TOKEN,
-            FULFILLMENT_ORDER_HOLD_MUTATION,
-            { fulfillmentHold, id: targetFo.id },
-            `hold fulfillment order for ${newOrderName}`
+            CREATE_FULFILLMENT_V2_MUTATION,
+            {
+              fulfillment: fulfillmentInput,
+              message: `Migrated fulfillment for ${parsedOrder.name}`,
+            },
+            `create fulfillment for ${newOrderName}`,
           );
 
-          if (holdResult.fulfillmentOrderHold.userErrors?.length) {
+          if (fulfillmentResult.fulfillmentCreateV2.userErrors?.length) {
             console.error(
-              "   ❌ Hold errors:",
-              holdResult.fulfillmentOrderHold.userErrors
+              "   ❌ Fulfillment errors:",
+              fulfillmentResult.fulfillmentCreateV2.userErrors,
             );
           } else {
+            const fulfillmentStatus =
+              fulfillmentResult.fulfillmentCreateV2.fulfillment
+                ?.displayStatus ||
+              fulfillmentResult.fulfillmentCreateV2.fulfillment?.status ||
+              "UNKNOWN";
             console.log(
-              `   ✅ Hold applied successfully on target fulfillment order ${targetFo.id}`
+              `   ✅ Fulfillment created successfully: ${fulfillmentStatus}`,
             );
           }
         }
       }
     } catch (err) {
-      console.error(`   ❌ Failed to mirror fulfillment holds: ${err.message}`);
-    }
-
-    /* --------------------------------------------
-       Mirror FULFILLMENTS (quantities + statuses)
-    --------------------------------------------- */
-    const sourceFulfillments = sourceOrder.fulfillments || [];
-    if (sourceFulfillments.length > 0) {
-      console.log(
-        `   📦 Source has ${sourceFulfillments.length} fulfillment(s); mirroring in target...`
-      );
-
-      const desiredQtyBySku = new Map();
-      const desiredQtyByVariantTitle = new Map();
-
-      for (const fulfillment of sourceFulfillments) {
-        for (const fli of fulfillment.fulfillmentLineItems.nodes) {
-          const qty = fli.quantity || 0;
-          if (!qty) continue;
-
-          const variant = fli.lineItem.variant;
-          const sku = variant?.sku || fli.lineItem.sku || null;
-          const variantTitle = variant?.title || fli.lineItem.title || null;
-
-          if (sku) {
-            desiredQtyBySku.set(sku, (desiredQtyBySku.get(sku) || 0) + qty);
-          }
-          if (variantTitle) {
-            desiredQtyByVariantTitle.set(
-              variantTitle,
-              (desiredQtyByVariantTitle.get(variantTitle) || 0) + qty
-            );
-          }
-        }
-      }
-
-      console.log(
-        "   📊 Desired quantities to fulfill (by SKU):",
-        Object.fromEntries(desiredQtyBySku)
-      );
-      console.log(
-        "   📊 Desired quantities to fulfill (by Variant Title):",
-        Object.fromEntries(desiredQtyByVariantTitle)
-      );
-
-      try {
-        const fulfillmentOrdersData = await graphqlRequest(
-          TARGET_GQL,
-          TARGET_ACCESS_TOKEN,
-          GET_FULFILLMENT_ORDERS_QUERY,
-          { orderId: newOrderId },
-          `get fulfillment orders for ${newOrderName}`
-        );
-
-        const fulfillmentOrderEdges =
-          fulfillmentOrdersData.order?.fulfillmentOrders?.edges || [];
-
-        if (fulfillmentOrderEdges.length === 0) {
-          console.warn("   ⚠️  No fulfillment orders found in target");
-        } else {
-          console.log(
-            `   📋 Found ${fulfillmentOrderEdges.length} fulfillment order(s) in target`
-          );
-
-          const lineItemsByFulfillmentOrder = [];
-
-          for (const foEdge of fulfillmentOrderEdges) {
-            const fo = foEdge.node;
-            const foId = fo.id;
-            const foItems = [];
-
-            for (const foliEdge of fo.lineItems.edges) {
-              const foli = foliEdge.node;
-              const remaining = foli.remainingQuantity ?? 0;
-              if (remaining <= 0) continue;
-
-              const targetSku = foli.lineItem.sku || null;
-              const targetVariantTitle =
-                foli.lineItem.variantTitle || foli.lineItem.title || null;
-
-              let desired = 0;
-              let keyType = null;
-
-              if (targetSku && desiredQtyBySku.has(targetSku)) {
-                desired = desiredQtyBySku.get(targetSku);
-                keyType = "sku";
-              } else if (
-                targetVariantTitle &&
-                desiredQtyByVariantTitle.has(targetVariantTitle)
-              ) {
-                desired = desiredQtyByVariantTitle.get(targetVariantTitle);
-                keyType = "variantTitle";
-              }
-
-              if (!desired) continue;
-
-              const qtyToFulfill = Math.min(desired, remaining);
-              if (qtyToFulfill <= 0) continue;
-
-              foItems.push({
-                id: foli.id,
-                quantity: qtyToFulfill,
-              });
-
-              if (keyType === "sku") {
-                const newRemaining = desired - qtyToFulfill;
-                if (newRemaining > 0) {
-                  desiredQtyBySku.set(targetSku, newRemaining);
-                } else {
-                  desiredQtyBySku.delete(targetSku);
-                }
-              } else if (keyType === "variantTitle") {
-                const newRemaining = desired - qtyToFulfill;
-                if (newRemaining > 0) {
-                  desiredQtyByVariantTitle.set(targetVariantTitle, newRemaining);
-                } else {
-                  desiredQtyByVariantTitle.delete(targetVariantTitle);
-                }
-              }
-
-              console.log(
-                `      ✅ Match for FO ${foId}: FOLI=${foli.id}, qty=${qtyToFulfill}, sku=${targetSku}, variantTitle=${targetVariantTitle}`
-              );
-            }
-
-            if (foItems.length > 0) {
-              lineItemsByFulfillmentOrder.push({
-                fulfillmentOrderId: foId,
-                fulfillmentOrderLineItems: foItems,
-              });
-            }
-          }
-
-          if (lineItemsByFulfillmentOrder.length === 0) {
-            console.warn(
-              "   ⚠️  No fulfillable items found in target for desired quantities"
-            );
-          } else {
-            const fulfillmentInput = {
-              notifyCustomer: false,
-              lineItemsByFulfillmentOrder,
-            };
-
-            console.log(
-              `   🚀 Creating fulfillment via fulfillmentCreateV2 with ${lineItemsByFulfillmentOrder.length} FO group(s)...`
-            );
-
-            const fulfillmentResult = await graphqlRequest(
-              TARGET_GQL,
-              TARGET_ACCESS_TOKEN,
-              CREATE_FULFILLMENT_V2_MUTATION,
-              {
-                fulfillment: fulfillmentInput,
-                message: `Migrated fulfillment for ${sourceOrder.name}`,
-              },
-              `create fulfillment for ${newOrderName}`
-            );
-
-            if (fulfillmentResult.fulfillmentCreateV2.userErrors?.length) {
-              console.error(
-                "   ❌ Fulfillment errors:",
-                fulfillmentResult.fulfillmentCreateV2.userErrors
-              );
-            } else {
-              const fulfillmentStatus =
-                fulfillmentResult.fulfillmentCreateV2.fulfillment?.displayStatus ||
-                fulfillmentResult.fulfillmentCreateV2.fulfillment?.status ||
-                "UNKNOWN";
-              console.log(
-                `   ✅ Fulfillment created successfully: ${fulfillmentStatus}`
-              );
-            }
-          }
-        }
-      } catch (err) {
-        console.error(`   ❌ Failed to mirror fulfillments: ${err.message}`);
-      }
-    } else {
-      console.log("   📦 No source fulfillments to mirror");
+      console.error(`   ❌ Failed to mirror fulfillments: ${err.message}`);
     }
 
     return {
       success: true,
       orderId: newOrderId,
       orderName: newOrderName,
-      sourceOrderName: sourceOrder.name,
+      sourceOrderName: parsedOrder.name,
     };
   } catch (err) {
     console.error(`   ❌ Failed: ${err.message}`);
@@ -1299,71 +1482,68 @@ async function migrateOrder(sourceOrder, customersMap, productsCache) {
 /* ============================================
    MAIN
 ============================================ */
-async function migrateOrders() {
-  console.log("🚀 Starting Order Migration \n");
+
+async function migrateOrdersFromSheet() {
+  console.log("🚀 Starting Order Migration FROM SHEET\n");
+
+  // Parse Excel (orders + metafield definitions)
+  const { parsedOrders, metafieldDefinitions } = loadOrdersFromSheet(ORDERS_XLSX);
+
+  // Ensure metafield definitions exist BEFORE creating orders
+  await ensureOrderMetafieldDefinitions(metafieldDefinitions);
 
   console.log("📋 Fetching target store data...");
   const customersMap = await fetchTargetCustomersMap();
-  console.log(`   ✅ ${customersMap.size} customers`);
+  console.log(`   ✅ ${customersMap.size} customers loaded`);
 
   const targetLocations = await fetchTargetLocations();
-  console.log(`   ✅ ${targetLocations.length} locations`);
+  console.log(`   ✅ ${targetLocations.length} locations loaded`);
 
   const productsCache = new Map();
 
-  let cursor = null;
   let totalCount = 0;
   let successCount = 0;
   let failureCount = 0;
   const failures = [];
 
-  while (true) {
-    const data = await graphqlRequest(
-      SOURCE_GQL,
-      SOURCE_ACCESS_TOKEN,
-      SOURCE_ORDERS_QUERY,
-      { cursor, pageSize: PAGE_SIZE },
-      "fetch source orders"
+  for (const parsedOrder of parsedOrders) {
+    totalCount++;
+    // if (parsedOrder.name !== "#1009") continue;
+
+    const result = await migrateParsedOrder(
+      parsedOrder,
+      customersMap,
+      productsCache,
     );
 
-    const edges = data.orders.edges;
-    if (!edges.length) break;
-
-    for (const edge of edges) {
-      const order = edge.node;
-      totalCount++;
-
-      const result = await migrateOrder(order, customersMap, productsCache);
-
-      if (result.success) {
-        successCount++;
-        console.log(
-          `   ✅ SUCCESS: ${result.sourceOrderName} → ${result.orderName}\n`
-        );
-      } else {
-        failureCount++;
-        failures.push({
-          sourceOrder: order.name,
-          reason: result.reason,
-          details:
-            result.missing ||
-            result.error ||
-            (result.errors ? JSON.stringify(result.errors) : ""),
-        });
-        console.log(`   ❌ FAILED: ${order.name} (${result.reason})\n`);
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 500));
+    if (result.success) {
+      successCount++;
+      console.log(
+        `   ✅ SUCCESS: SheetOrder ${parsedOrder.name} → ${result.orderName}\n`,
+      );
+    } else {
+      failureCount++;
+      failures.push({
+        sourceOrder: parsedOrder.name,
+        reason: result.reason,
+        details:
+          result.missing ||
+          result.error ||
+          (result.errors ? JSON.stringify(result.errors) : ""),
+      });
+      console.log(
+        `   ❌ FAILED: SheetOrder ${parsedOrder.name} (${result.reason})\n`,
+      );
     }
 
-    if (!data.orders.pageInfo.hasNextPage) break;
-    cursor = data.orders.pageInfo.endCursor;
+    // small delay to avoid API hammering
+    await new Promise((resolve) => setTimeout(resolve, 13000));
   }
 
   console.log("\n" + "=".repeat(60));
-  console.log("🎉 MIGRATION COMPLETE");
+  console.log("🎉 MIGRATION FROM SHEET COMPLETE");
   console.log("=".repeat(60));
-  console.log(`📊 Total: ${totalCount}`);
+  console.log(`📊 Total orders: ${totalCount}`);
   console.log(`✅ Success: ${successCount}`);
   console.log(`❌ Failed: ${failureCount}`);
 
@@ -1371,8 +1551,8 @@ async function migrateOrders() {
     console.log("\n⚠️  Failed Orders:");
     failures.forEach((f) => {
       console.log(
-        `   - ${f.sourceOrder}: ${f.reason} ${f.details ? `(${f.details})` : ""
-        }`
+        `   - ${f.sourceOrder}: ${f.reason}${f.details ? ` (${f.details})` : ""
+        }`,
       );
     });
   }
@@ -1381,7 +1561,7 @@ async function migrateOrders() {
 /* ============================================
    START
 ============================================ */
-migrateOrders().catch((err) => {
+migrateOrdersFromSheet().catch((err) => {
   console.error("🚨 Fatal:", err.message);
   process.exit(1);
 });
