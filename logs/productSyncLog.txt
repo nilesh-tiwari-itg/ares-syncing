@@ -1,0 +1,48 @@
+[2025-11-29T07:13:37.305Z] 🚀 Starting product sync: SOURCE → TARGET
+[2025-11-29T07:13:37.333Z]    SOURCE_SHOP = kimberbellsandbox.myshopify.com
+[2025-11-29T07:13:37.336Z]    TARGET_SHOP = test-itg-saloni.myshopify.com
+[2025-11-29T07:13:40.226Z] 💥 Fatal error in product sync: GraphQL errors (GetProducts(SOURCE)): [{"message":"Selections can't be made on scalars (field 'price' returns Money but has selections [\"amount\", \"currencyCode\"])","locations":[{"line":71,"column":15}],"path":["query GetProducts","products","edges","node","variants","nodes","price"],"extensions":{"code":"selectionMismatch","nodeName":"field 'price'","typeName":"Money"}},{"message":"Selections can't be made on scalars (field 'compareAtPrice' returns Money but has selections [\"amount\", \"currencyCode\"])","locations":[{"line":75,"column":15}],"path":["query GetProducts","products","edges","node","variants","nodes","compareAtPrice"],"extensions":{"code":"selectionMismatch","nodeName":"field 'compareAtPrice'","typeName":"Money"}}]
+[2025-11-29T07:15:00.653Z] 🚀 Starting product sync: SOURCE → TARGET
+[2025-11-29T07:15:00.662Z]    SOURCE_SHOP = kimberbellsandbox.myshopify.com
+[2025-11-29T07:15:00.669Z]    TARGET_SHOP = test-itg-saloni.myshopify.com
+[2025-11-29T07:15:01.448Z] 💥 Fatal error in product sync: GraphQL errors (GetProducts(SOURCE)): [{"message":"Query cost is 1325, which exceeds the single query max cost limit (1000).\n\nSee https://shopify.dev/docs/api/usage/rate-limits for more information on how the\ncost of a query is calculated.\n\nTo query larger amounts of data with fewer limits, bulk operations should be used instead.\nSee https://shopify.dev/docs/api/usage/bulk-operations/queries for usage details.\n","extensions":{"code":"MAX_COST_EXCEEDED","cost":1325,"maxCost":1000,"documentation":"https://shopify.dev/api/usage/rate-limits"}}]
+[2025-11-29T07:15:18.834Z] 🚀 Starting product sync: SOURCE → TARGET
+[2025-11-29T07:15:18.847Z]    SOURCE_SHOP = kimberbellsandbox.myshopify.com
+[2025-11-29T07:15:18.851Z]    TARGET_SHOP = test-itg-saloni.myshopify.com
+[2025-11-29T07:15:19.689Z] 💥 Fatal error in product sync: GraphQL errors (GetProducts(SOURCE)): [{"message":"Access denied for products field.","locations":[{"line":3,"column":5}],"path":["products"],"extensions":{"code":"ACCESS_DENIED","documentation":"https://shopify.dev/api/usage/access-scopes"}}]
+[2025-11-29T07:15:44.962Z] 🚀 Starting product sync: SOURCE → TARGET
+[2025-11-29T07:15:44.977Z]    SOURCE_SHOP = arestechnologies.myshopify.com
+[2025-11-29T07:15:44.980Z]    TARGET_SHOP = test-itg-saloni.myshopify.com
+[2025-11-29T07:15:46.112Z] [1] 🔄 Syncing product "Programming GAS Modules" (handle: programming-gas-modules)
+[2025-11-29T07:15:47.178Z] [1] ✅ Synced product → TARGET id=gid://shopify/Product/10172610445611, handle=programming-gas-modules, status=ACTIVE
+[2025-11-29T07:15:47.181Z] [2] 🔄 Syncing product "Programming DIESEL Modules" (handle: programming-diesel-modules)
+[2025-11-29T07:15:48.032Z] [2] ✅ Synced product → TARGET id=gid://shopify/Product/10172610478379, handle=programming-diesel-modules, status=ACTIVE
+[2025-11-29T07:15:48.036Z] [3] 🔄 Syncing product "56044208 2004 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044396AD" (handle: 56044208-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad)
+[2025-11-29T07:15:48.484Z] [3] ❌ FAILED syncing product "56044208 2004 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044396AD" (handle: 56044208-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad) :: productSet userErrors: [{"field":["input","variants","0","metafields","0"],"message":"Setting Harmonized system code ('harmonized_system_code') as metafield on Product Variant is no longer supported. Update 'harmonized_system_code' on inventory item instead.","code":"INVALID_METAFIELD"}]
+[2025-11-29T07:15:48.515Z] [4] 🔄 Syncing product "56044221 2004 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044396AD" (handle: 56044221-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad)
+[2025-11-29T07:15:48.954Z] [4] ❌ FAILED syncing product "56044221 2004 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044396AD" (handle: 56044221-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad) :: productSet userErrors: [{"field":["input","variants","0","metafields","0"],"message":"Setting Harmonized system code ('harmonized_system_code') as metafield on Product Variant is no longer supported. Update 'harmonized_system_code' on inventory item instead.","code":"INVALID_METAFIELD"}]
+[2025-11-29T07:15:48.971Z] [5] 🔄 Syncing product "56044224 2004 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044396AD" (handle: 56044224-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad)
+[2025-11-29T07:15:49.410Z] [5] ❌ FAILED syncing product "56044224 2004 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044396AD" (handle: 56044224-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad) :: productSet userErrors: [{"field":["input","variants","0","metafields","0"],"message":"Setting Harmonized system code ('harmonized_system_code') as metafield on Product Variant is no longer supported. Update 'harmonized_system_code' on inventory item instead.","code":"INVALID_METAFIELD"}]
+[2025-11-29T07:15:49.427Z] [6] 🔄 Syncing product "56052449 2004 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044396AD" (handle: 56052449-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad)
+[2025-11-29T07:24:31.062Z] 🚀 Starting product sync: SOURCE → TARGET
+[2025-11-29T07:24:31.073Z]    SOURCE_SHOP = arestechnologies.myshopify.com
+[2025-11-29T07:24:31.076Z]    TARGET_SHOP = test-itg-saloni.myshopify.com
+[2025-11-29T07:24:32.001Z] [1] 🔄 Syncing product "Programming GAS Modules" (handle: programming-gas-modules)
+[2025-11-29T07:24:32.844Z] [1] ✅ Synced product → TARGET id=gid://shopify/Product/10172610445611, handle=programming-gas-modules, status=ACTIVE
+[2025-11-29T07:24:32.847Z] [2] 🔄 Syncing product "Programming DIESEL Modules" (handle: programming-diesel-modules)
+[2025-11-29T07:24:33.521Z] [2] ✅ Synced product → TARGET id=gid://shopify/Product/10172610478379, handle=programming-diesel-modules, status=ACTIVE
+[2025-11-29T07:24:33.525Z] [3] 🔄 Syncing product "56044208 2004 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044396AD" (handle: 56044208-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad)
+[2025-11-29T07:24:34.418Z] [3] ✅ Synced product → TARGET id=gid://shopify/Product/10172612346155, handle=56044208-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad, status=ACTIVE
+[2025-11-29T07:24:34.421Z] [4] 🔄 Syncing product "56044221 2004 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044396AD" (handle: 56044221-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad)
+[2025-11-29T07:24:35.293Z] [4] ✅ Synced product → TARGET id=gid://shopify/Product/10172612378923, handle=56044221-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad, status=ACTIVE
+[2025-11-29T07:24:35.296Z] [5] 🔄 Syncing product "56044224 2004 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044396AD" (handle: 56044224-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad)
+[2025-11-29T07:24:36.070Z] [5] ✅ Synced product → TARGET id=gid://shopify/Product/10172612411691, handle=56044224-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad, status=ACTIVE
+[2025-11-29T07:24:36.073Z] [6] 🔄 Syncing product "56052449 2004 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044396AD" (handle: 56052449-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad)
+[2025-11-29T07:24:37.022Z] [6] ✅ Synced product → TARGET id=gid://shopify/Product/10172612444459, handle=56052449-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad, status=ACTIVE
+[2025-11-29T07:24:37.026Z] [7] 🔄 Syncing product "56044576 2005 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044666AC" (handle: 56044576-2005-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044666ac)
+[2025-11-29T07:24:37.833Z] [7] ✅ Synced product → TARGET id=gid://shopify/Product/10172612477227, handle=56044576-2005-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044666ac, status=ACTIVE
+[2025-11-29T07:24:37.836Z] [8] 🔄 Syncing product "56044656 2005 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044666AC" (handle: 56044656-2005-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044666ac)
+[2025-11-29T07:24:38.661Z] [8] ✅ Synced product → TARGET id=gid://shopify/Product/10172612542763, handle=56044656-2005-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044666ac, status=ACTIVE
+[2025-11-29T07:24:38.664Z] [9] 🔄 Syncing product "56044658 2005 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044666AC" (handle: 56044658-2005-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044666ac)
+[2025-11-29T07:24:39.484Z] [9] ✅ Synced product → TARGET id=gid://shopify/Product/10172612575531, handle=56044658-2005-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044666ac, status=ACTIVE
+[2025-11-29T07:24:39.488Z] [10] 🔄 Syncing product "56052683 2005 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044666AC" (handle: 56052683-2005-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044666ac)

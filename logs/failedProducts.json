@@ -1,0 +1,26 @@
+[
+  {
+    "index": 3,
+    "sourceProductId": "gid://shopify/Product/4705518846090",
+    "handle": "56044208-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad",
+    "title": "56044208 2004 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044396AD",
+    "reason": "productSet userErrors: [{\"field\":[\"input\",\"variants\",\"0\",\"metafields\",\"0\"],\"message\":\"Setting Harmonized system code ('harmonized_system_code') as metafield on Product Variant is no longer supported. Update 'harmonized_system_code' on inventory item instead.\",\"code\":\"INVALID_METAFIELD\"}]",
+    "at": "2025-11-29T07:15:48.488Z"
+  },
+  {
+    "index": 4,
+    "sourceProductId": "gid://shopify/Product/4705518977162",
+    "handle": "56044221-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad",
+    "title": "56044221 2004 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044396AD",
+    "reason": "productSet userErrors: [{\"field\":[\"input\",\"variants\",\"0\",\"metafields\",\"0\"],\"message\":\"Setting Harmonized system code ('harmonized_system_code') as metafield on Product Variant is no longer supported. Update 'harmonized_system_code' on inventory item instead.\",\"code\":\"INVALID_METAFIELD\"}]",
+    "at": "2025-11-29T07:15:48.958Z"
+  },
+  {
+    "index": 5,
+    "sourceProductId": "gid://shopify/Product/4705519075466",
+    "handle": "56044224-2004-jeep-liberty-3-7l-engine-computer-ecm-pcm-56044396ad",
+    "title": "56044224 2004 Jeep Liberty 3.7L Plug & Play ECM PCM | 56044396AD",
+    "reason": "productSet userErrors: [{\"field\":[\"input\",\"variants\",\"0\",\"metafields\",\"0\"],\"message\":\"Setting Harmonized system code ('harmonized_system_code') as metafield on Product Variant is no longer supported. Update 'harmonized_system_code' on inventory item instead.\",\"code\":\"INVALID_METAFIELD\"}]",
+    "at": "2025-11-29T07:15:49.414Z"
+  }
+]
