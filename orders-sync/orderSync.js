@@ -20,8 +20,9 @@ const TARGET_ACCESS_TOKEN = process.env.TARGET_ACCESS_TOKEN;
 // These are no longer used because we read file from req.file.buffer,
 // but we keep them in case you still want a CLI mode later.
 const ORDERS_XLSX =
-  process.env.ORDERS_XLSX ||
-  path.join(__dirname, "Export_2025-12-04_031652.xlsx");
+  process.env.ORDERS_XLSX
+// ||
+// path.join(__dirname, "Export_2025-12-04_031652.xlsx");
 
 // Basic validation
 if (!TARGET_SHOP || !TARGET_ACCESS_TOKEN) {
@@ -30,8 +31,8 @@ if (!TARGET_SHOP || !TARGET_ACCESS_TOKEN) {
 }
 
 if (!fs.existsSync(ORDERS_XLSX)) {
-  console.error(`❌ Excel file not found: ${ORDERS_XLSX}`);
-  process.exit(1);
+  // console.error(`❌ Excel file not found: ${ORDERS_XLSX}`);
+  // process.exit(1);
 }
 
 const TARGET_GQL = `https://${TARGET_SHOP}/admin/api/${API_VERSION}/graphql.json`;
@@ -84,6 +85,72 @@ async function graphqlRequest(endpoint, token, query, variables = {}, label = ""
 /* ============================================
    NORMALIZERS
 ============================================ */
+
+function toNumber(val) {
+  if (val === null || val === undefined || val === "") return null;
+  const n = Number(val);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Shopify expects rate as decimal (e.g., 0.13). Some exports may use 13 for 13%.
+function normalizeTaxRate(rateRaw, contextLabel = "") {
+  const r = toNumber(rateRaw);
+  if (r === null) return null;
+
+  if (r > 1 && r <= 100) {
+    console.warn(`⚠️ Tax rate looks like percent (${r}) in ${contextLabel}; converting to decimal.`);
+    return r / 100;
+  }
+
+  return r;
+}
+
+function parseTaxLinesFromRow({
+  row,
+  titleKeyFn,  // (i) => string
+  rateKeyFn,   // (i) => string
+  priceKeyFn,  // (i) => string
+  currencyCode,
+  max = 3,
+  contextLabel = "",
+}) {
+  const lines = [];
+
+  for (let i = 1; i <= max; i++) {
+    const title = row[titleKeyFn(i)];
+    const rateRaw = row[rateKeyFn(i)];
+    const priceRaw = row[priceKeyFn(i)];
+
+    if (!title && rateRaw == null && priceRaw == null) continue;
+
+    const rate = normalizeTaxRate(rateRaw, `${contextLabel} tax ${i}`);
+    const price = toNumber(priceRaw);
+
+    // Shopify requires title + rate (non-null)
+    if (!title || rate === null) {
+      console.warn(
+        `⚠️ Skipping tax line ${i} in ${contextLabel}: missing title or rate.`,
+        { title, rateRaw, priceRaw }
+      );
+      continue;
+    }
+
+    lines.push({
+      title: String(title),
+      rate,
+      priceSet: {
+        shopMoney: {
+          amount: Math.abs(price ?? 0),
+          currencyCode, // IMPORTANT: must be order currency (shop currency)
+        },
+      },
+      // channelLiable: false, // optional
+    });
+  }
+
+  return lines;
+}
+
 function normalizeInventoryBehaviour(input) {
   if (!input) return "BYPASS";
 
@@ -206,6 +273,33 @@ function mapCancelReason(reasonRaw) {
 /* ============================================
    GQL QUERIES / MUTATIONS
 ============================================ */
+
+const GET_COMPANIES_QUERY = `
+query getCompanies($cursor: String) {
+  companies(first: 100, after: $cursor) {
+    edges {
+      cursor
+      node {
+        id
+        name
+        externalId
+        locations(first: 100) {
+          nodes {
+            id
+            name
+            externalId
+          }
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+`;
+
 
 const GET_ORDER_TRANSACTIONS = `
  query getOrderTransactions($id: ID!) {
@@ -390,10 +484,17 @@ const SINGLE_CUSTOMER_QUERY = `
           firstName
           lastName
           companyContactProfiles {
-            company {
-              id
-              name
-            }
+           company {
+             id
+             name
+             locations(first: 250) {
+               nodes {
+                 id
+                 name
+               }
+             }
+           }
+          
           }
         }
       }
@@ -477,29 +578,6 @@ const REFUND_CREATE_MUTATION = `
   }
 `;
 
-// Suggested refund – used to get parentTransaction.id + gateway for refund transactions
-const SUGGESTED_REFUND_QUERY = `
-  query SuggestedRefund($id: ID!, $refundLineItems: [RefundLineItemInput!]) {
-    order(id: $id) {
-      id
-      suggestedRefund(refundLineItems: $refundLineItems) {
-        suggestedTransactions {
-          parentTransaction {
-            id
-          }
-          gateway
-          amountSet {
-            presentmentMoney {
-              amount
-              currencyCode
-            }
-          }
-        }
-      }
-    }
-  }
-`;
-
 // Order cancel – optional (no extra refund, no restock)
 const ORDER_CANCEL_MUTATION = `
   mutation OrderCancel(
@@ -534,6 +612,90 @@ const ORDER_CANCEL_MUTATION = `
     }
   }
 `;
+
+async function fetchTargetCompanies() {
+  const companies = [];
+  let cursor = null;
+
+  while (true) {
+    const data = await graphqlRequest(
+      TARGET_GQL,
+      TARGET_ACCESS_TOKEN,
+      GET_COMPANIES_QUERY,
+      { cursor },
+      "fetch target companies"
+    );
+
+    const edges = data?.companies?.edges || [];
+    for (const edge of edges) {
+      companies.push(edge.node);
+    }
+
+    if (!data.companies.pageInfo.hasNextPage) break;
+    cursor = data.companies.pageInfo.endCursor;
+  }
+
+  return companies;
+}
+function resolveCompanyFromCustomerEmail(email, parsedOrder, targetCustomerData) {
+  if (!email) return null;
+  console.log("customer DATA : ", targetCustomerData);
+
+  if (!targetCustomerData) {
+    console.warn(`⚠️ No customer found for email=${email}`);
+    return null;
+  }
+
+  const profiles = targetCustomerData.companyContactProfiles || [];
+  if (profiles.length !== 1) {
+    console.warn(
+      `⚠️ Customer ${email} has ${profiles.length} company profiles (expected 1)`
+    );
+    return null;
+  }
+
+  const company = profiles[0].company;
+  if (!company) return null;
+
+  const locations = company.locations?.nodes || [];
+
+  // 1️⃣ If exactly one location → safe
+  if (locations.length === 1) {
+    return {
+      companyId: company.id,
+      companyLocationId: locations[0].id,
+    };
+  }
+
+  // 2️⃣ Try exact name match from sheet
+  const locationNameFromSheet =
+    parsedOrder?.companyData?.companyLocationName;
+
+  if (locationNameFromSheet) {
+    const matches = locations.filter(
+      (l) => l.name === locationNameFromSheet
+    );
+
+    if (matches.length === 1) {
+      return {
+        companyId: company.id,
+        companyLocationId: matches[0].id,
+      };
+    }
+
+    console.warn(
+      `⚠️ Location name "${locationNameFromSheet}" matched ${matches.length} locations`
+    );
+  }
+
+  // 3️⃣ Ambiguous → do not link
+  console.warn(
+    `⚠️ Could not safely resolve company location for customer ${email}`
+  );
+
+  return null;
+}
+
 
 /* ============================================
    TARGET HELPERS
@@ -613,12 +775,15 @@ async function fetchSingleCustomer(email) {
   if (edges.length === 0) return null;
 
   const customer = edges[0].node;
-  const company = customer.companyContactProfiles?.company || null;
+  const companyContactProfiles = customer.companyContactProfiles || null;
+  const company = customer.companyContactProfiles[0]?.company || null;
 
   return {
     customerId: customer.id,
+    companyContactProfiles,
     companyId: company?.id || null,
     companyName: company?.name || null,
+
   }
 }
 
@@ -920,6 +1085,7 @@ function loadOrdersFromSheet(fileBuffer) {
     const first = groupRows[0];
 
     const email = first["Email"] || first["Customer: Email"] || null;
+    const customerEmail = first["Customer: Email"] 
 
     const createdAtRaw = first["Created At"] || null;
     const createdAt = normalizeDateTime(createdAtRaw);
@@ -927,6 +1093,19 @@ function loadOrdersFromSheet(fileBuffer) {
     const currency = first["Currency"] || null;
     const tagsRaw = first["Tags"] || "";
     const taxesIncluded = !!(first["Tax: Included"] || 0);
+
+    const orderTaxLines = parseTaxLinesFromRow({
+      row: first,
+      titleKeyFn: (i) => `Tax ${i}: Title`,
+      rateKeyFn: (i) => `Tax ${i}: Rate`,
+      priceKeyFn: (i) => `Tax ${i}: Price`,
+      currencyCode: currency, // order currency (shop currency)
+      max: 3,
+      contextLabel: `Order ${first["Name"] || orderId}`,
+    });
+
+    const orderTaxTotal = toNumber(first["Tax: Total"]); // optional for logging/validation
+
     const paymentStatus = first["Payment: Status"] || null;
 
     const sendReceiptRaw = first["Send Receipt"];
@@ -983,6 +1162,19 @@ function loadOrdersFromSheet(fileBuffer) {
       phone: first["Shipping: Phone"] || null,
     };
 
+    // --- Company / Company Location (B2B) ---
+    const companyData = {
+      companyId: first["Company: ID"] || null,
+      companyName: first["Company: Name"] || null,
+      companyExternalId: first["Company: External ID"] || null,
+
+      companyLocationId: first["Company: Location ID"] || null,
+      companyLocationName: first["Company: Location Name"] || null,
+      companyLocationExternalId:
+        first["Company: Location External ID"] || null,
+    };
+
+
     // Line items
     const lineItems = [];
     for (const r of groupRows.filter((r) => r["Line: Type"] === "Line Item")) {
@@ -993,6 +1185,17 @@ function loadOrdersFromSheet(fileBuffer) {
 
       const requiresShippingRaw = r["Line: Requires Shipping"];
       const taxableRaw = r["Line: Taxable"];
+      const lineTaxLines = parseTaxLinesFromRow({
+        row: r,
+        titleKeyFn: (i) => `Line: Tax ${i} Title`,
+        rateKeyFn: (i) => `Line: Tax ${i} Rate`,
+        priceKeyFn: (i) => `Line: Tax ${i} Price`,
+        currencyCode: currency, // order currency
+        max: 3,
+        contextLabel: `Line "${r["Line: Title"] || r["Line: SKU"] || "UNKNOWN"}" in ${first["Name"] || orderId}`,
+      });
+
+      const lineTaxTotal = toNumber(r["Line: Tax Total"]); // optional
 
       lineItems.push({
         productHandle: r["Line: Product Handle"] || null,
@@ -1005,6 +1208,9 @@ function loadOrdersFromSheet(fileBuffer) {
         fulfillmentStatus: r["Line: Fulfillment Status"] || null,
         requiresShipping: asBool(requiresShippingRaw),
         taxable: asBool(taxableRaw),
+
+        taxLines: lineTaxLines,
+        taxTotal: lineTaxTotal,
       });
     }
 
@@ -1015,7 +1221,18 @@ function loadOrdersFromSheet(fileBuffer) {
       if (priceRaw == null) continue;
       const price = Number(priceRaw);
       const title = r["Line: Title"] || "Shipping";
-      shippingLines.push({ title, price });
+
+      const shippingTaxLines = parseTaxLinesFromRow({
+        row: r,
+        titleKeyFn: (i) => `Line: Tax ${i} Title`,
+        rateKeyFn: (i) => `Line: Tax ${i} Rate`,
+        priceKeyFn: (i) => `Line: Tax ${i} Price`,
+        currencyCode: currency,
+        max: 3,
+        contextLabel: `Shipping "${title}" in ${first["Name"] || orderId}`,
+      });
+
+      shippingLines.push({ title, price, taxLines: shippingTaxLines, });
     }
 
     // Discount rows
@@ -1058,6 +1275,7 @@ function loadOrdersFromSheet(fileBuffer) {
 
     // Transactions (read from sheet but we will NOT send in orderCreate)
     const transactions = [];
+    let presentmentCurrency = null;
     for (const r of groupRows.filter((r) => r["Line: Type"] === "Transaction")) {
       const amount = r["Transaction: Amount"];
       const shopAmount = r["Transaction: Shop Currency Amount"];
@@ -1082,6 +1300,8 @@ function loadOrdersFromSheet(fileBuffer) {
         test: asBool(r["Transaction: Test"]),
         processedAt: txProcessedAt,
       });
+
+      // presentmentCurrency = r["Transaction: Currency"] || null;
     }
 
     // Refund lines – from "Refund Line"
@@ -1181,6 +1401,7 @@ function loadOrdersFromSheet(fileBuffer) {
       sourceId: orderId,
       name: first["Name"] || null,
       email,
+      customerEmail,
       createdAt,
       currency,
       tags,
@@ -1210,6 +1431,12 @@ function loadOrdersFromSheet(fileBuffer) {
       // refunds
       refundLines,
       refundTotal,
+      companyData,
+      presentmentCurrency,
+
+      //taxes
+      orderTaxLines,
+      orderTaxTotal,
     });
   }
 
@@ -1243,7 +1470,12 @@ function buildOrderCreateInputFromParsed(parsedOrder, targetCustomerData) {
     metafields,
     orderNote,
     phone,
+    presentmentCurrency,
+    orderTaxLines,
+    orderTaxTotal,
   } = parsedOrder;
+
+
 
   const order = {
     email,
@@ -1253,8 +1485,24 @@ function buildOrderCreateInputFromParsed(parsedOrder, targetCustomerData) {
     phone: phone || null,
     note: orderNote,
     test: false,
+    taxLines: orderTaxLines
   };
 
+
+  const companyResolution = resolveCompanyFromCustomerEmail(
+    parsedOrder.customerEmail,
+    parsedOrder,
+    targetCustomerData
+  );
+
+  if (companyResolution?.companyLocationId) {
+    order.companyLocationId = companyResolution.companyLocationId;
+    console.log(
+      `   🏢 Linked via customer → company location ${companyResolution.companyLocationId}`
+    );
+  } else {
+    console.warn("   ⚠️ CompanyLocation not resolved via customer email");
+  }
   // Only set processedAt if we have a valid normalized date
   if (createdAt) {
     order.processedAt = createdAt;
@@ -1263,6 +1511,7 @@ function buildOrderCreateInputFromParsed(parsedOrder, targetCustomerData) {
   // Tags
   const finalTags = [...(tags || [])];
   finalTags.push("migrated-from-sheet");
+  finalTags.push(parsedOrder?.name);
   order.tags = finalTags;
 
   // Customer (associate by email)
@@ -1327,16 +1576,24 @@ function buildOrderCreateInputFromParsed(parsedOrder, targetCustomerData) {
   console.log(order.discountCode)
   // Shipping lines
   if (shippingLines && shippingLines.length > 0) {
-    order.shippingLines = shippingLines.map((sl) => ({
-      title: sl.title || "Shipping",
-      priceSet: {
-        shopMoney: {
-          amount: sl.price || 0,
-          currencyCode: currency,
+    order.shippingLines = shippingLines.map((sl) => {
+      const out = {
+        title: sl.title || "Shipping",
+        priceSet: {
+          shopMoney: {
+            amount: sl.price || 0,
+            currencyCode: currency,
+          },
         },
-      },
-    }));
+      };
+
+      // if (sl.taxLines && sl.taxLines.length > 0) {
+      //   out.taxLines = sl.taxLines;
+      // }
+      return out;
+    });
   }
+
 
   // Financial status
   const financialStatus = mapFinancialStatus(paymentStatus);
@@ -1367,6 +1624,7 @@ function buildOrderCreateInputFromParsed(parsedOrder, targetCustomerData) {
   // IMPORTANT: we do NOT include REFUND transactions here; refunds will be created via refundCreate.
 
   if (transactions && transactions.length > 0) {
+    console.log("transactions", transactions);
     const paymentTransactions = transactions.filter(
       (tx) => tx.kind !== "REFUND" && tx.kind !== "PARTIAL_REFUND",
     );
@@ -1400,7 +1658,7 @@ function buildOrderCreateInputFromParsed(parsedOrder, targetCustomerData) {
             },
             presentmentMoney: {
               amount: presentmentAmount,
-              currencyCode: tx.currency || currency,
+              currencyCode: currency,
             },
           },
           test: true,
@@ -1426,7 +1684,6 @@ function buildOrderCreateInputFromParsed(parsedOrder, targetCustomerData) {
       value: mf.value,
     }));
   }
-
   return order;
 }
 
@@ -1436,11 +1693,14 @@ function buildOrderCreateInputFromParsed(parsedOrder, targetCustomerData) {
 
 async function migrateParsedOrder(parsedOrder,
   //  customersMap,
-  productsCache) {
+  productsCache,
+  targetCompanies
+
+) {
   console.log(
     `\n▶ Migrating order from sheet: ${parsedOrder.name} (ID=${parsedOrder.sourceId})`,
   );
-  console.log(`   📧 Customer: ${parsedOrder.email || "No email"}`);
+  console.log(`   📧 Customer: ${parsedOrder.customerEmail || "No email"}`);
   console.log(`   💳 Payment: ${parsedOrder.paymentStatus || "unknown"}`);
   console.log(
     `   📦 Fulfillment Status: ${parsedOrder.orderFulfillmentStatus || "unknown"
@@ -1455,19 +1715,11 @@ async function migrateParsedOrder(parsedOrder,
 
   // 1. Customer mapping
   // const targetCustomerData = parsedOrder.email ? customersMap.get(parsedOrder.email.toLowerCase()) : null;
-  const targetCustomerData = await fetchSingleCustomer(parsedOrder.email);
-
-  // console.log("------------target customer Data", targetCustomerData);
-  // console.log("------------target customer Data 2", targetCustomerData2);
+  const targetCustomerData = await fetchSingleCustomer(parsedOrder.customerEmail);
 
   if (!targetCustomerData) {
-    console.warn(`   ⚠️  Customer not found in target: ${parsedOrder.email}`);
+    console.warn(`   ⚠️  Customer not found in target: ${parsedOrder.customerEmail}`);
     return { success: false, reason: "customer_not_found" };
-  }
-
-  console.log(`   👤 Customer: ${targetCustomerData.customerId}`);
-  if (targetCustomerData.companyId) {
-    console.log(`   🏢 Company: ${targetCustomerData.companyName}`);
   }
 
   // 2. Map products/variants + build GraphQL lineItems
@@ -1554,10 +1806,19 @@ async function migrateParsedOrder(parsedOrder,
           amount: unitPrice,
           currencyCode: parsedOrder.currency,
         },
+        // presentmentMoney: {
+        //   amount: unitPrice,
+        //   currencyCode: parsedOrder.presentmentCurrency,
+        // },
       },
       requiresShipping,
       taxable,
+
     };
+
+    // if (li.taxLines && li.taxLines.length > 0) {
+    //   lineInput.taxLines = li.taxLines;
+    // }
 
     lineItemsInput.push(lineInput);
     console.log(
@@ -1663,10 +1924,11 @@ async function migrateParsedOrder(parsedOrder,
 
   // 4. Create order
   try {
-    if (parsedOrder.name === "#1021") {
-      console.log("   📝 orderInput...", JSON.stringify(orderInput, null, 2));
-    }
+    console.log("   📝 orderInput...", JSON.stringify(orderInput, null, 2));
     console.log("   📝 Creating order via orderCreate...");
+    // orderInput.companyLocationId = "gid://shopify/CompanyLocation/3726311723";
+
+    console.log("   📝 orderInput...", JSON.stringify(orderInput, null, 2));
 
     const result = await graphqlRequest(
       TARGET_GQL,
@@ -1675,7 +1937,8 @@ async function migrateParsedOrder(parsedOrder,
       {
         order: orderInput,
         options: {
-          inventoryBehaviour: normalizeInventoryBehaviour(parsedOrder.inventoryBehaviour),
+          // inventoryBehaviour: normalizeInventoryBehaviour(parsedOrder.inventoryBehaviour),
+          inventoryBehaviour: "BYPASS",
           sendReceipt: false,
           sendFulfillmentReceipt: false,
         },
@@ -1800,7 +2063,7 @@ async function migrateParsedOrder(parsedOrder,
         console.log(`   📦 Found  transactions,`, JSON.stringify(createdTxEdges, null, 2));
 
 
-        const flatTx = createdTxEdges.map(e => e.node);
+        // const flatTx = createdTxEdges.map(e => e.node);
         const parentTx = findParentTransactionForRefund(createdTxEdges);
 
         if (parentTx) {
@@ -1843,7 +2106,8 @@ async function migrateParsedOrder(parsedOrder,
           refundLineItems,
           transactions: refundTransactions,
           note: refundNote,
-          notify: notifyCustomer,
+          notify: false,
+          // notify: notifyCustomer,
         };
         console.log(refundInput)
 
@@ -2155,6 +2419,8 @@ export async function migrateOrdersFromSheet(req, res) {
 
     // const customersMap = await fetchTargetCustomersMap();
     // console.log(`   ✅ ${customersMap.size} customers loaded`);
+    const targetCompanies = await fetchTargetCompanies();
+    console.log(`   ✅ ${targetCompanies.length} companies loaded`);
 
     const targetLocations = await fetchTargetLocations();
     console.log(`   ✅ ${targetLocations.length} locations loaded`);
@@ -2174,6 +2440,7 @@ export async function migrateOrdersFromSheet(req, res) {
         parsedOrder,
         // customersMap,
         productsCache,
+        targetCompanies
       );
 
       if (result.success) {
