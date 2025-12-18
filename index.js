@@ -3,9 +3,11 @@ import dotenv from 'dotenv';
 import { migrateOrdersFromSheet } from './orders-sync/orderSync.js';
 dotenv.config();
 import multer from "multer";
+import { migrateProducts } from './productSync.js';
 const upload = multer();
 const app = express();
 const PORT = process.env.PORT || 8080;
+
 // app.use(
 //     cors({
 //         origin: "*", // Allow all origins
@@ -26,6 +28,7 @@ app.use(
 
 // Routes
 app.use("/order", upload.single("file"), migrateOrdersFromSheet);
+app.use("/product", upload.single("file"), migrateProducts);
 
 // Start server
 app.listen(PORT, () => {

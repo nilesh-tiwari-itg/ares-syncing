@@ -60,7 +60,6 @@ async function graphqlRequest(endpoint, token, query, variables = {}, label = ""
       console.error(`❌ Invalid JSON for ${label}:`, text);
       throw new Error("Invalid JSON");
     }
-
     if (!res.ok) {
       console.error(`❌ HTTP ${res.status} on ${label}`);
       console.error(text);
@@ -150,6 +149,46 @@ function parseTaxLinesFromRow({
 
   return lines;
 }
+
+async function updateCustomerEmail({
+  customerId,
+  email,
+}) {
+
+  const result = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    CUSTOMER_UPDATE_MUTATION,
+    {
+      input: {
+        id: customerId,
+        email: email,
+      },
+    },
+    `customerUpdate ${label || customerId}`
+  );
+
+  const payload = result.customerUpdate;
+
+  if (payload.userErrors?.length) {
+    console.error(
+      `   ❌ customerUpdate failed:`,
+      payload.userErrors
+    );
+    return {
+      updated: false,
+      reason: "user_errors",
+      errors: payload.userErrors,
+    };
+  }
+
+  console.log(
+    `   ✅ Customer email updated successfully → ${payload.customer.email}`
+  );
+
+  return true
+}
+
 
 function normalizeInventoryBehaviour(input) {
   if (!input) return "BYPASS";
@@ -273,6 +312,21 @@ function mapCancelReason(reasonRaw) {
 /* ============================================
    GQL QUERIES / MUTATIONS
 ============================================ */
+const CUSTOMER_UPDATE_MUTATION = `
+  mutation updateCustomer($input: CustomerInput!) {
+    customerUpdate(input: $input) {
+      customer {
+        id
+        email
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
 
 const GET_COMPANIES_QUERY = `
 query getCompanies($cursor: String) {
@@ -1071,7 +1125,7 @@ function loadOrdersFromSheet(fileBuffer) {
   // Group rows by ID (order id)
   const groups = new Map();
   for (const row of rows) {
-    const id = row["ID"];
+    const id = row["Name"];
     if (!id) continue;
     if (!groups.has(id)) groups.set(id, []);
     groups.get(id).push(row);
@@ -1085,7 +1139,7 @@ function loadOrdersFromSheet(fileBuffer) {
     const first = groupRows[0];
 
     const email = first["Email"] || first["Customer: Email"] || null;
-    const customerEmail = first["Customer: Email"] 
+    const customerEmail = first["Customer: Email"]
 
     const createdAtRaw = first["Created At"] || null;
     const createdAt = normalizeDateTime(createdAtRaw);
@@ -1212,6 +1266,7 @@ function loadOrdersFromSheet(fileBuffer) {
         taxLines: lineTaxLines,
         taxTotal: lineTaxTotal,
       });
+
     }
 
     // Shipping lines
@@ -1480,11 +1535,12 @@ function buildOrderCreateInputFromParsed(parsedOrder, targetCustomerData) {
   const order = {
     email,
     currency,
+    name: parsedOrder.name,
     presentmentCurrency: currency,
     taxesIncluded: !!taxesIncluded,
     phone: phone || null,
     note: orderNote,
-    test: false,
+    test: true,
     taxLines: orderTaxLines
   };
 
@@ -1518,6 +1574,7 @@ function buildOrderCreateInputFromParsed(parsedOrder, targetCustomerData) {
   if (targetCustomerData?.customerId) {
     order.customer = {
       toAssociate: {
+        // email: parsedOrder.customerEmail,
         id: targetCustomerData.customerId,
       },
     };
@@ -1968,6 +2025,10 @@ async function migrateParsedOrder(parsedOrder,
     console.log(
       `   💰 Total: ${order.totalPriceSet.shopMoney.amount} ${order.totalPriceSet.shopMoney.currencyCode}`,
     );
+
+    // if (newOrderName && parsedOrder.email !== parsedOrder.customerEmail) {
+    //   await updateCustomerEmail(targetCustomerData.customerId, parsedOrder.customerEmail);
+    // }
 
     /* --------------------------------------------
        REFUND LOGIC (uses Refund Line from sheet)
@@ -2431,7 +2492,6 @@ export async function migrateOrdersFromSheet(req, res) {
     let successCount = 0;
     let failureCount = 0;
     const failures = [];
-
     for (const parsedOrder of parsedOrders) {
       totalCount++;
       // if (parsedOrder.name !== "#1009") continue;
