@@ -81,6 +81,19 @@ const DELETE_ORDER_MUTATION = `
   }
 `;
 
+const REMOVE_ORDER_CUSTOMER = `
+mutation orderCustomerRemove($orderId: ID!) {
+  orderCustomerRemove(orderId: $orderId) {
+    order {
+    id
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}`;
+
 /* ============================================
    DELETE A SINGLE ORDER
 ============================================ */
@@ -95,6 +108,16 @@ async function deleteOrder(orderId, name) {
 
   if (result.userErrors?.length) {
     console.error(`⚠️ Failed to delete ${name}:`, result.userErrors);
+    // const data = await graphqlRequest(
+    //   REMOVE_ORDER_CUSTOMER,
+    //   { orderId },
+    //   `remove customer from ${name}`
+    // )
+    // const result1 = data.orderCustomerRemove;
+
+    // if (result1.userErrors?.length) {
+    //   console.error(`⚠️ Failed to remove customer from ${name}:`, result1.userErrors);
+    // }
     return false;
   }
 

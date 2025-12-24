@@ -133,10 +133,206 @@ function buildMatrixifyPublicationInputs(product, targetPublicationMap) {
 }
 
 
+const ALLOWED_METAFIELD_TYPES = new Set([
+  "boolean",
+  "color",
+  "date",
+  "date_time",
+  "dimension",
+  "id",
+  "json",
+  "link",
+  "money",
+  "multi_line_text_field",
+  "number_decimal",
+  "number_integer",
+  "rating",
+  "rich_text_field",
+  "single_line_text_field",
+  "url",
+  "volume",
+  "weight",
+
+  "article_reference",
+  "collection_reference",
+  "company_reference",
+  "customer_reference",
+  "file_reference",
+  "metaobject_reference",
+  "mixed_reference",
+  "page_reference",
+  "product_reference",
+  "product_taxonomy_value_reference",
+  "variant_reference",
+
+  "list.article_reference",
+  "list.collection_reference",
+  "list.color",
+  "list.customer_reference",
+  "list.date",
+  "list.date_time",
+  "list.dimension",
+  "list.file_reference",
+  "list.id",
+  "list.link",
+  "list.metaobject_reference",
+  "list.mixed_reference",
+  "list.number_decimal",
+  "list.number_integer",
+  "list.page_reference",
+  "list.product_reference",
+  "list.product_taxonomy_value_reference",
+  "list.rating",
+  "list.single_line_text_field",
+  "list.url",
+  "list.variant_reference",
+  "list.volume",
+  "list.weight",
+]);
+const PRODUCT_METAFIELD_DEFS_QUERY = `
+query ProductMetafieldDefinitions($cursor: String) {
+  metafieldDefinitions(
+    first: 250
+    ownerType: PRODUCT
+    after: $cursor
+  ) {
+    nodes {
+      namespace
+      key
+      type { name }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+`; const VARIANT_METAFIELD_DEFS_QUERY = `
+query VariantMetafieldDefinitions($cursor: String) {
+  metafieldDefinitions(
+    first: 250
+    ownerType: PRODUCTVARIANT
+    after: $cursor
+  ) {
+    nodes {
+      namespace
+      key
+      type { name }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+`;
+async function ensureMetafieldDefinitions({
+  ownerType,
+  query,
+  metafields,
+}) {
+  try {
+    if (!metafields.length) return;
+
+    const existing = new Map();
+    let cursor = null;
+
+    do {
+      const data = await graphqlRequest(
+        TARGET_GQL,
+        TARGET_ACCESS_TOKEN,
+        query,
+        { cursor },
+        `${ownerType}MetafieldDefinitions`
+      );
+
+      const defs = data.metafieldDefinitions;
+      defs.nodes.forEach(d => {
+        existing.set(`${d.namespace}.${d.key}`, d.type.name);
+      });
+
+      cursor = defs.pageInfo.hasNextPage
+        ? defs.pageInfo.endCursor
+        : null;
+    } while (cursor);
+
+    for (const mf of metafields) {
+      if (mf.namespace === "shopify") {
+        continue
+      }
+      const id = `${mf.namespace}.${mf.key}`;
+
+      if (existing.has(id)) {
+        const existingType = existing.get(id);
+        if (existingType !== mf.type) {
+          console.warn(
+            `⚠️ Metafield type mismatch for ${id}: existing=${existingType}, sheet=${mf.type}`
+          );
+        }
+        continue;
+      }
+      console.log(`➕ Creating ${ownerType} metafield: ${id} [${mf.type}]`);
+      console.log({
+        ownerType,
+        namespace: mf.namespace,
+        key: mf.key,
+        type: mf.type,
+        name: mf.key,
+        pin: true,
+      },)
+
+      const res = await graphqlRequest(
+        TARGET_GQL,
+        TARGET_ACCESS_TOKEN,
+        METAFIELD_DEFINITION_CREATE,
+        {
+          definition: {
+            ownerType,
+            namespace: mf.namespace,
+            key: mf.key,
+            type: mf.type,
+            name: mf.key,
+            pin: true,
+          },
+        },
+        "metafieldDefinitionCreate"
+      );
+
+      if (res.metafieldDefinitionCreate?.userErrors?.length) {
+        throw new Error(
+          JSON.stringify(res.metafieldDefinitionCreate.userErrors, null, 2)
+        );
+      }
+
+      await new Promise(r => setTimeout(r, 250));
+    }
+  }
+  catch (e) {
+    console.log(e)
+    return null
+  }
+}
 
 /* ============================================
    SOURCE PRODUCT QUERY
 ============================================ */
+const METAFIELD_DEFINITION_CREATE = `
+mutation MetafieldDefinitionCreate($definition: MetafieldDefinitionInput!) {
+  metafieldDefinitionCreate(definition: $definition) {
+    createdDefinition {
+      id
+      namespace
+      key
+      type { name }
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}
+`;
+
 const SOURCE_PRODUCTS_QUERY = `
  query listProducts($cursor: String, $pageSize: Int!) {
   products(first: $pageSize, after: $cursor) {
@@ -460,17 +656,38 @@ const PRODUCT_BY_HANDLE_QUERY = `
     }
   }
 `;
+const PRODUCTS_BY_HANDLE_QUERY = `
+  query ProductsByHandle($q: String!) {
+  products(first: 250, query: $q) {
+    nodes {
+      id
+      handle
+    }
+  }
+}
+`;
 
-async function findTargetProductByHandle(handle) {
+async function findTargetProductByHandle(handlesList) {
   const data = await graphqlRequest(
     TARGET_GQL,
     TARGET_ACCESS_TOKEN,
-    PRODUCT_BY_HANDLE_QUERY,
-    { handle },
+    PRODUCTS_BY_HANDLE_QUERY,
+    { handles },
     "findTargetProductByHandle"
   );
 
-  return data.productByHandle?.id || null;
+  return data.productByHandle?.ids || null;
+}
+async function findProductsByHandle(handles) {
+  const data = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    PRODUCTS_BY_HANDLE_QUERY,
+    { q: handles },
+    "findTargetProductByHandle"
+  );
+
+  return data.products || null;
 }
 
 /* ============================================
@@ -714,33 +931,69 @@ function buildPublicationInputsFromSourceProduct(product, targetPublicationMap) 
   return Array.from(targetIds).map((id) => ({ publicationId: id }));
 }
 
+async function resolveReferenceValue({
+  type,
+  rawValue,
+}) {
+  if (!rawValue) return null;
+
+  const isList = type.startsWith("list.");
+  const baseType = isList ? type.replace("list.", "") : type;
+
+  const values = isList
+    ? String(rawValue).split(",").map(v => v.trim()).filter(Boolean)
+    : [String(rawValue).trim()];
+
+  const resolved = [];
+
+  for (const v of values) {
+    let gid = null;
+
+    switch (baseType) {
+      case "product_reference": {
+        console.log(`   📌 Resolving product reference: "${v}"`);
+        const ids = await findProductsByHandle(v);
+        if (!id) return null;
+        gid = id;
+        break;
+      }
+
+      // case "collection_reference":
+      //   gid = maps.collectionByHandle[v];
+      //   break;
+
+      // case "variant_reference":
+      //   gid = maps.variantBySku[v] || maps.variantById[v];
+      //   break;
+
+      // case "file_reference":
+      //   gid = maps.mediaByUrl[v] || maps.mediaByFilename[v];
+      //   break;
+
+      // case "metaobject_reference":
+      //   gid = maps.metaobjectByHandle[v];
+      //   break;
+
+      default:
+        return null;
+    }
+
+    if (gid) resolved.push(gid);
+    else {
+      console.warn(
+        `⚠️ Unresolved ${baseType}: "${v}" → metafield skipped`
+      );
+    }
+  }
+
+  if (!resolved.length) return null;
+
+  return isList ? JSON.stringify(resolved) : resolved[0];
+}
+
 /* ============================================
    BUILD INVENTORY QUANTITIES FROM SOURCE VARIANT
 ============================================ */
-// function buildInventoryQuantitiesForVariant(variant, locationMap) {
-//   const inventoryQuantities = [];
-//   const inventoryLevels = variant.inventoryItem?.inventoryLevels?.nodes || [];
-
-//   for (const level of inventoryLevels) {
-//     const sourceLocationId = level.location.id;
-//     const targetLocationId = locationMap.get(sourceLocationId);
-
-//     if (!targetLocationId) {
-//       continue; // Skip unmapped locations
-//     }
-
-//     const availableQty = level.quantities.find(q => q.name === "available")?.quantity || 0;
-//     // const qty = Math.max(0, Number(availableQty));
-//     const qty = availableQty;
-//     inventoryQuantities.push({
-//       locationId: targetLocationId,
-//       name: "available",
-//       quantity: qty,
-//     });
-//   }
-
-//   return inventoryQuantities;
-// }
 
 function loadSheetRows(fileBuffer) {
   const wb = XLSX.read(fileBuffer, { type: "buffer" });
@@ -1108,8 +1361,8 @@ function buildProductsFromSheetRows(rows, { targetLocationNameMap = [] } = {}) {
         category: row["Category: ID"] ? normalizeCategoryId(row["Category: ID"]) : null,
         resourcePublications: { nodes: [] },
         seo: {
-          title: row["SEO Title"] || row["SEO: Title"] || null,
-          description: row["SEO Description"] || row["SEO: Description"] || null,
+          title: row["Metafield: title_tag [string]"] || row["SEO: Title"] || null,
+          description: row["Metafield: description_tag [string]"] || row["SEO: Description"] || null,
         },
 
         // internal collectors
@@ -1131,10 +1384,10 @@ function buildProductsFromSheetRows(rows, { targetLocationNameMap = [] } = {}) {
     if (!p.productType && (row["Type"] || row["Product: Type"])) p.productType = row["Type"] || row["Product: Type"];
     if (!p.status && (row["Status"] || row["Product: Status"]))
       p.status = normalizeStatus(row["Status"] || row["Product: Status"]);
-    if ((!p.seo?.title && (row["SEO Title"] || row["SEO: Title"])) || (!p.seo?.description && (row["SEO Description"] || row["SEO: Description"]))) {
+    if ((!p.seo?.title && (row["Metafield: title_tag [string]"] || row["SEO: Title"])) || (!p.seo?.description && (row["Metafield: description_tag [string]"] || row["SEO: Description"]))) {
       p.seo = {
-        title: p.seo?.title || row["SEO Title"] || row["SEO: Title"] || null,
-        description: p.seo?.description || row["SEO Description"] || row["SEO: Description"] || null,
+        title: p.seo?.title || row["Metafield: title_tag [string]"] || row["SEO: Title"] || null,
+        description: p.seo?.description || row["Metafield: description_tag [string]"] || row["SEO: Description"] || null,
       };
     }
     // 🟢 Matrixify publication fields (STRICT)
@@ -1596,8 +1849,58 @@ export async function migrateProducts(req, res) {
   let cursor = null;
   let count = 0;
 
+  const rows = loadSheetRows(fileBuffer);
+
+  const productMetafieldsMap = new Map();
+  const variantMetafieldsMap = new Map();
+
+  for (const col of Object.keys(rows[0] || {})) {
+    const pm = col.match(/^Metafield:\s*(.+?)\.(.+?)\s*\[(.+?)\]/i);
+    if (pm && ALLOWED_METAFIELD_TYPES.has(pm[3])) {
+      const key = `${pm[1].trim()}.${pm[2].trim()}`;
+      productMetafieldsMap.set(key, {
+        namespace: pm[1].trim(),
+        key: pm[2].trim(),
+        type: pm[3].trim(),
+      });
+    }
+
+    const vm = col.match(/^Variant\s+Metafield:\s*(.+?)\.(.+?)\s*\[(.+?)\]/i);
+    if (vm && ALLOWED_METAFIELD_TYPES.has(vm[3])) {
+      const key = `${vm[1].trim()}.${vm[2].trim()}`;
+      variantMetafieldsMap.set(key, {
+        namespace: vm[1].trim(),
+        key: vm[2].trim(),
+        type: vm[3].trim(),
+      });
+    }
+  }
+
+  const productMetafields = [...productMetafieldsMap.values()];
+  const variantMetafields = [...variantMetafieldsMap.values()];
+
+  // ✅ Ensure definitions exist BEFORE productSet
+  await ensureMetafieldDefinitions({
+    ownerType: "PRODUCT",
+    query: PRODUCT_METAFIELD_DEFS_QUERY,
+    metafields: productMetafields,
+  });
+
+  await ensureMetafieldDefinitions({
+    ownerType: "PRODUCTVARIANT",
+    query: VARIANT_METAFIELD_DEFS_QUERY,
+    metafields: variantMetafields,
+  });
+
+
   while (true) {
-    const rows = loadSheetRows(fileBuffer);
+    // const rows = loadSheetRows(fileBuffer);
+    // const productsFromSheet = buildProductsFromSheetRows(rows, {
+    //   targetLocationNameMap,
+    // });
+
+
+
     const productsFromSheet = buildProductsFromSheetRows(rows, {
       targetLocationNameMap,
     });
