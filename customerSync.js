@@ -6,6 +6,7 @@
 import dotenv from "dotenv";
 dotenv.config();
 import XLSX from "xlsx";
+import { sanitizeMetafieldsForShopify } from "./utils.js";
 
 /**
  * CONFIG
@@ -643,7 +644,17 @@ function buildCustomerInput(c) {
 
 
     if (c._metafields instanceof Map && c._metafields.size) {
-        input.metafields = Array.from(c._metafields.values());
+        const rawMetafields = Array.from(c._metafields.values());
+
+        const safeMetafields = sanitizeMetafieldsForShopify({
+            metafields: rawMetafields,
+            ownerLabel: "CUSTOMER",
+            entityLabel: c.email || c.phone || c._key,
+        });
+
+        if (safeMetafields.length) {
+            input.metafields = safeMetafields;
+        }
     }
 
     // Addresses: order default first (Shopify default will effectively become first address)

@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import XLSX from "xlsx";
 import { fileURLToPath } from "url";
+import { sanitizeMetafieldsForShopify } from "../utils.js";
 
 dotenv.config();
 
@@ -778,6 +779,70 @@ async function checkProductExists(handle, productsCache) {
     return null;
   }
 }
+function normalizeBoolMetafieldValue(v) {
+  // Shopify metafieldsSet for boolean expects "true"/"false"
+  if (v === true) return "true";
+  if (v === false) return "false";
+  if (isEmpty(v)) return null;
+  const s = String(v).trim().toLowerCase();
+  if (["true", "1", "yes", "y"].includes(s)) return "true";
+  if (["false", "0", "no", "n"].includes(s)) return "false";
+  return null;
+}
+
+function normalizeListMetafieldValue(v) {
+  if (isEmpty(v)) return null;
+  const raw = String(v).trim();
+
+  // If it's already JSON array, keep it
+  if (raw.startsWith("[") && raw.endsWith("]")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return JSON.stringify(parsed);
+    } catch (_) {
+      // fall through
+    }
+  }
+
+  const parts = raw.split(",").map((x) => x.trim()).filter(Boolean);
+  return JSON.stringify(parts.length ? parts : [raw]);
+}
+function normalizeOrderMetafieldsForCreate(orderId, metafields) {
+  const safeMetafields = sanitizeMetafieldsForShopify({
+    metafields,
+    ownerLabel: "ORDER",
+    entityLabel: orderId,
+  });
+
+  const out = [];
+
+  for (const mf of safeMetafields) {
+    const { namespace, key, type, value } = mf;
+    const t = String(type).toLowerCase();
+
+    let finalValue = value;
+
+    if (t === "boolean") {
+      finalValue = normalizeBoolMetafieldValue(value);
+      if (finalValue === null) continue;
+    } else if (t.startsWith("list.")) {
+      finalValue = normalizeListMetafieldValue(value);
+      if (finalValue === null) continue;
+    } else {
+      finalValue = String(value);
+    }
+
+    out.push({
+      namespace,
+      key,
+      type,
+      value: finalValue,
+    });
+  }
+
+  return out;
+}
+
 
 async function fetchTargetCustomersMap() {
   const map = new Map(); // email(lowercase) -> { customerId, companyId, companyName }
@@ -1733,13 +1798,16 @@ function buildOrderCreateInputFromParsed(parsedOrder, targetCustomerData) {
   }
 
   // Metafields (order-level)
+  // Metafields (order-level) — SANITIZED
   if (metafields && metafields.length > 0) {
-    order.metafields = metafields.map((mf) => ({
-      namespace: mf.namespace,
-      key: mf.key,
-      type: mf.type,
-      value: mf.value,
-    }));
+    const safeOrderMetafields = normalizeOrderMetafieldsForCreate(
+      parsedOrder.name || parsedOrder.sourceId,
+      metafields
+    );
+
+    if (safeOrderMetafields.length > 0) {
+      order.metafields = safeOrderMetafields;
+    }
   }
   return order;
 }

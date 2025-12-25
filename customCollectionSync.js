@@ -7,6 +7,7 @@ dotenv.config();
 import fs from "fs";
 import path from "path";
 import XLSX from "xlsx";
+import { sanitizeMetafieldsForShopify } from "./utils.js";
 
 /**
  * CONFIG
@@ -26,60 +27,60 @@ const TARGET_GQL = `https://${TARGET_SHOP}/admin/api/${API_VERSION}/graphql.json
  */
 
 const ALLOWED_METAFIELD_TYPES = new Set([
-  "boolean",
-  "color",
-  "date",
-  "date_time",
-  "dimension",
-  "id",
-  "json",
-  "link",
-  "money",
-  "multi_line_text_field",
-  "number_decimal",
-  "number_integer",
-  "rating",
-  "rich_text_field",
-  "single_line_text_field",
-  "url",
-  "volume",
-  "weight",
+    "boolean",
+    "color",
+    "date",
+    "date_time",
+    "dimension",
+    "id",
+    "json",
+    "link",
+    "money",
+    "multi_line_text_field",
+    "number_decimal",
+    "number_integer",
+    "rating",
+    "rich_text_field",
+    "single_line_text_field",
+    "url",
+    "volume",
+    "weight",
 
-  "article_reference",
-  "collection_reference",
-  "company_reference",
-  "customer_reference",
-  "file_reference",
-  "metaobject_reference",
-  "mixed_reference",
-  "page_reference",
-  "product_reference",
-  "product_taxonomy_value_reference",
-  "variant_reference",
+    "article_reference",
+    "collection_reference",
+    "company_reference",
+    "customer_reference",
+    "file_reference",
+    "metaobject_reference",
+    "mixed_reference",
+    "page_reference",
+    "product_reference",
+    "product_taxonomy_value_reference",
+    "variant_reference",
 
-  "list.article_reference",
-  "list.collection_reference",
-  "list.color",
-  "list.customer_reference",
-  "list.date",
-  "list.date_time",
-  "list.dimension",
-  "list.file_reference",
-  "list.id",
-  "list.link",
-  "list.metaobject_reference",
-  "list.mixed_reference",
-  "list.number_decimal",
-  "list.number_integer",
-  "list.page_reference",
-  "list.product_reference",
-  "list.product_taxonomy_value_reference",
-  "list.rating",
-  "list.single_line_text_field",
-  "list.url",
-  "list.variant_reference",
-  "list.volume",
-  "list.weight",
+    "list.article_reference",
+    "list.collection_reference",
+    "list.color",
+    "list.customer_reference",
+    "list.date",
+    "list.date_time",
+    "list.dimension",
+    "list.file_reference",
+    "list.id",
+    "list.link",
+    "list.metaobject_reference",
+    "list.mixed_reference",
+    "list.number_decimal",
+    "list.number_integer",
+    "list.page_reference",
+    "list.product_reference",
+    "list.product_taxonomy_value_reference",
+    "list.rating",
+    "list.single_line_text_field",
+    "list.url",
+    "list.variant_reference",
+    "list.volume",
+    "list.weight",
 ]);
 const COLLECTION_METAFIELD_DEFS_QUERY = `
 query CollectionMetafieldDefinitions($cursor: String) {
@@ -184,82 +185,83 @@ async function ensureMetafieldDefinitions({
     query,
     metafields,
 }) {
-    try{
-    if (!metafields.length) return;
+    try {
+        if (!metafields.length) return;
 
-    const existing = new Map();
-    let cursor = null;
+        const existing = new Map();
+        let cursor = null;
 
-    do {
-        const data = await graphqlRequest(
-            TARGET_GQL,
-            TARGET_ACCESS_TOKEN,
-            query,
-            { cursor },
-            `${ownerType}MetafieldDefinitions`
-        );
+        do {
+            const data = await graphqlRequest(
+                TARGET_GQL,
+                TARGET_ACCESS_TOKEN,
+                query,
+                { cursor },
+                `${ownerType}MetafieldDefinitions`
+            );
 
-        const defs = data.metafieldDefinitions;
-        defs.nodes.forEach(d => {
-            existing.set(`${d.namespace}.${d.key}`, d.type.name);
-        });
+            const defs = data.metafieldDefinitions;
+            defs.nodes.forEach(d => {
+                existing.set(`${d.namespace}.${d.key}`, d.type.name);
+            });
 
-        cursor = defs.pageInfo.hasNextPage
-            ? defs.pageInfo.endCursor
-            : null;
-    } while (cursor);
+            cursor = defs.pageInfo.hasNextPage
+                ? defs.pageInfo.endCursor
+                : null;
+        } while (cursor);
 
-    for (const mf of metafields) {
-        if (mf.namespace === "shopify") {
-            continue
-        }
-        const id = `${mf.namespace}.${mf.key}`;
+        for (const mf of metafields) {
+            if (mf.namespace === "shopify") {
+                continue
+            }
+            const id = `${mf.namespace}.${mf.key}`;
 
-        if (existing.has(id)) {
-            const existingType = existing.get(id);
-            if (existingType !== mf.type) {
-                console.warn(
-                    `⚠️ Metafield type mismatch for ${id}: existing=${existingType}, sheet=${mf.type}`
+            if (existing.has(id)) {
+                const existingType = existing.get(id);
+                if (existingType !== mf.type) {
+                    console.warn(
+                        `⚠️ Metafield type mismatch for ${id}: existing=${existingType}, sheet=${mf.type}`
+                    );
+                }
+                continue;
+            }
+            console.log(`➕ Creating ${ownerType} metafield: ${id} [${mf.type}]`);
+            console.log({
+                ownerType,
+                namespace: mf.namespace,
+                key: mf.key,
+                type: mf.type,
+                name: mf.key,
+                pin: true,
+            },)
+
+            const res = await graphqlRequest(
+                TARGET_GQL,
+                TARGET_ACCESS_TOKEN,
+                METAFIELD_DEFINITION_CREATE,
+                {
+                    definition: {
+                        ownerType,
+                        namespace: mf.namespace,
+                        key: mf.key,
+                        type: mf.type,
+                        name: mf.key,
+                        pin: true,
+                    },
+                },
+                "metafieldDefinitionCreate"
+            );
+
+            if (res.metafieldDefinitionCreate?.userErrors?.length) {
+                throw new Error(
+                    JSON.stringify(res.metafieldDefinitionCreate.userErrors, null, 2)
                 );
             }
-            continue;
+
+            await new Promise(r => setTimeout(r, 250));
         }
-        console.log(`➕ Creating ${ownerType} metafield: ${id} [${mf.type}]`);
-        console.log({
-            ownerType,
-            namespace: mf.namespace,
-            key: mf.key,
-            type: mf.type,
-            name: mf.key,
-            pin: true,
-        },)
-
-        const res = await graphqlRequest(
-            TARGET_GQL,
-            TARGET_ACCESS_TOKEN,
-            METAFIELD_DEFINITION_CREATE,
-            {
-                definition: {
-                    ownerType,
-                    namespace: mf.namespace,
-                    key: mf.key,
-                    type: mf.type,
-                    name: mf.key,
-                    pin: true,
-                },
-            },
-            "metafieldDefinitionCreate"
-        );
-
-        if (res.metafieldDefinitionCreate?.userErrors?.length) {
-            throw new Error(
-                JSON.stringify(res.metafieldDefinitionCreate.userErrors, null, 2)
-            );
-        }
-
-        await new Promise(r => setTimeout(r, 250));
-    }}
-    catch(e){
+    }
+    catch (e) {
         console.log(e)
         return null
     }
@@ -580,7 +582,15 @@ async function mapCustomCollectionToCreateInput(c) {
     }
 
     if (Array.isArray(c.metafields) && c.metafields.length > 0) {
-        input.metafields = c.metafields;
+        const safeMetafields = sanitizeMetafieldsForShopify({
+            metafields: c.metafields,
+            ownerLabel: "COLLECTION",
+            entityLabel: c.handle,
+        });
+
+        if (safeMetafields.length) {
+            input.metafields = safeMetafields;
+        }
     }
 
     return input;

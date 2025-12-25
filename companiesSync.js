@@ -5,6 +5,7 @@
 import dotenv from "dotenv";
 dotenv.config();
 import XLSX from "xlsx";
+import { sanitizeMetafieldsForShopify } from "./utils.js";
 
 /**
  * CONFIG
@@ -700,16 +701,26 @@ function locationsMapFromCompany(companyNode) {
 }
 
 function normalizeMetafieldsSetPayload(companyId, metafields) {
+    // 🔒 Single Shopify-boundary sanitization (consistent across all scripts)
+    const safeMetafields = sanitizeMetafieldsForShopify({
+        metafields,
+        ownerLabel: "COMPANY",
+        entityLabel: companyId,
+    });
+
     const out = [];
-    for (const mf of metafields || []) {
+
+    for (const mf of safeMetafields) {
         const { namespace, key, type, value } = mf;
 
         let finalValue = value;
 
-        if (String(type).toLowerCase() === "boolean") {
+        const t = String(type).toLowerCase();
+
+        if (t === "boolean") {
             finalValue = normalizeBoolMetafieldValue(value);
             if (finalValue === null) continue;
-        } else if (String(type).toLowerCase().startsWith("list.")) {
+        } else if (t.startsWith("list.")) {
             finalValue = normalizeListMetafieldValue(value);
             if (finalValue === null) continue;
         } else {
@@ -724,8 +735,10 @@ function normalizeMetafieldsSetPayload(companyId, metafields) {
             value: finalValue,
         });
     }
+
     return out;
 }
+
 
 /**
  * Company creation/upsert flow from sheet object
