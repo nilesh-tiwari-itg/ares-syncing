@@ -677,7 +677,7 @@ async function findTargetProductByHandle(handle) {
     "findTargetProductByHandle"
   );
 
-  return data.productByHandle?.ids || null;
+  return data.productByHandle?.id || null;
 }
 async function findProductsByHandle(handles) {
   const data = await graphqlRequest(

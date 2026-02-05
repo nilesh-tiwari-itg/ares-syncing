@@ -7,7 +7,7 @@ dotenv.config();
 const API_VERSION = process.env.API_VERSION || "2025-10";
 
 const SHOP = "test-itg-saloni.myshopify.com";
-const ACCESS_TOKEN = process.env.TARGET_ACCESS_TOKEN;
+const ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const PAGE_SIZE = 50;
 
 if (!SHOP || !ACCESS_TOKEN) {

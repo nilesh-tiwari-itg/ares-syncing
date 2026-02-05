@@ -8,6 +8,9 @@ import { migrateCustomCollections } from './customCollectionSync.js';
 import { migrateSmartCollections } from './smartCollectionSync.js';
 import { migrateCustomers } from './customerSync.js';
 import { migrateCompanies } from './companiesSync.js';
+import { syncBlogsAndArticles } from './blogSync.js';
+import { migrateFiles } from './fileupload.js';
+import { syncPagesFromSheet } from './pagesSync.js';
 const upload = multer();
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -37,6 +40,9 @@ app.use("/customers", upload.single("file"), migrateCustomers);
 app.use("/companies", upload.single("file"), migrateCompanies);
 app.use("/custom-collection", upload.single("file"), migrateCustomCollections);
 app.use("/smart-collection", upload.single("file"), migrateSmartCollections);
+// app.use("/pdffiles", upload.single("file"),migrateFiles );
+app.use("/blogs", upload.single("file"), syncBlogsAndArticles);
+app.use("/pages", upload.single("file"), syncPagesFromSheet);
 
 // Start server
 app.listen(PORT, () => {
