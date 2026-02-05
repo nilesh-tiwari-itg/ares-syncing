@@ -33,6 +33,10 @@
  * - Uses GraphQL mutations you shared: commentApprove, commentSpam
  * - For "unapproved": tries commentUnapprove (if your API supports it); if not, logs and continues
  *
+ * ✅ NEW (requested now - update existing article):
+ * - If article already exists (same handle in same blog), UPDATE it using articleUpdate
+ * - Keeps rest of the flow same (comments block runs as before)
+ *
  * Install:
  *   npm i dotenv xlsx
  *
@@ -96,6 +100,25 @@ function getTimestampForFilename() {
     `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_` +
     `${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`
   );
+}
+async function fetchProductGidByHandle(productHandle) {
+  const query = `#graphql
+  query GetProductByHandle($handle: String!) {
+    productByHandle(handle: $handle) {
+      id
+    }
+  }`;
+
+  const variables = { handle: productHandle };
+
+  const response = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    query,
+    variables,
+    "fetchProductGid"
+  );
+  return response.productByHandle ? response.productByHandle.id : null;
 }
 
 function ensureDir(dirPath) {
@@ -197,7 +220,6 @@ function toDateTimeISO(v) {
   return null;
 }
 
-
 /**
  * Shopify Blog commentPolicy mapping
  */
@@ -251,11 +273,15 @@ function getCommentPayloadFromRow(row) {
     !isEmpty(row["Comment: Body"])
       ? String(row["Comment: Body"])
       : !isEmpty(row["Comment: Body HTML"])
-        ? String(row["Comment: Body HTML"])
-        : null;
+      ? String(row["Comment: Body HTML"])
+      : null;
 
-  const author = !isEmpty(row["Comment: Author"]) ? String(row["Comment: Author"]) : "Anonymous";
-  const email = !isEmpty(row["Comment: Email"]) ? String(row["Comment: Email"]) : "no-reply@example.com";
+  const author = !isEmpty(row["Comment: Author"])
+    ? String(row["Comment: Author"])
+    : "Anonymous";
+  const email = !isEmpty(row["Comment: Email"])
+    ? String(row["Comment: Email"])
+    : "no-reply@example.com";
 
   return { body, author, email };
 }
@@ -291,7 +317,9 @@ async function createArticleCommentREST({ body, author, email, blog_id, article_
   }
 
   if (!json?.comment?.id) {
-    throw new Error(`Comment created but comment.id missing. Response: ${text.slice(0, 800)}`);
+    throw new Error(
+      `Comment created but comment.id missing. Response: ${text.slice(0, 800)}`
+    );
   }
 
   return json.comment; // contains numeric id
@@ -431,7 +459,10 @@ async function graphqlRequest(endpoint, token, query, variables = {}, label = ""
   }
 
   if (json.errors?.length) {
-    console.error(`❌ GraphQL errors (${label}):`, JSON.stringify(json.errors, null, 2));
+    console.error(
+      `❌ GraphQL errors (${label}):`,
+      JSON.stringify(json.errors, null, 2)
+    );
     throw new Error("GraphQL error");
   }
 
@@ -496,6 +527,26 @@ mutation CreateArticle($article: ArticleCreateInput!) {
 }
 `;
 
+/**
+ * ✅ NEW: Article update mutation (added, nothing removed)
+ */
+const ARTICLE_UPDATE_MUTATION = `#graphql
+mutation UpdateArticle($id: ID!, $article: ArticleUpdateInput!) {
+  articleUpdate(id: $id, article: $article) {
+    article {
+      id
+      title
+      handle
+    }
+    userErrors {
+      code
+      field
+      message
+    }
+  }
+}
+`;
+
 const ARTICLE_METAFIELD_DEFS_QUERY = `#graphql
 query ArticleMetafieldDefinitions {
   metafieldDefinitions(first: 250, ownerType: ARTICLE) {
@@ -528,14 +579,23 @@ mutation MetafieldDefinitionCreate($definition: MetafieldDefinitionInput!) {
  */
 const ALLOWED_METAFIELD_TYPES = new Set([
   "boolean",
+  "color",
   "date",
   "date_time",
+  "dimension",
+  "id",
   "json",
+  "link",
+  "money",
+  "multi_line_text_field",
   "number_decimal",
   "number_integer",
-  "multi_line_text_field",
+  "rating",
+  "rich_text_field",
   "single_line_text_field",
   "url",
+  "volume",
+  "weight",
 
   "article_reference",
   "collection_reference",
@@ -546,15 +606,32 @@ const ALLOWED_METAFIELD_TYPES = new Set([
   "mixed_reference",
   "page_reference",
   "product_reference",
+  "product_taxonomy_value_reference",
   "variant_reference",
 
-  "list.single_line_text_field",
-  "list.multi_line_text_field",
-  "list.number_integer",
-  "list.number_decimal",
-  "list.url",
+  "list.article_reference",
+  "list.collection_reference",
+  "list.color",
+  "list.customer_reference",
   "list.date",
   "list.date_time",
+  "list.dimension",
+  "list.file_reference",
+  "list.id",
+  "list.link",
+  "list.metaobject_reference",
+  "list.mixed_reference",
+  "list.number_decimal",
+  "list.number_integer",
+  "list.page_reference",
+  "list.product_reference",
+  "list.product_taxonomy_value_reference",
+  "list.rating",
+  "list.single_line_text_field",
+  "list.url",
+  "list.variant_reference",
+  "list.volume",
+  "list.weight",
 ]);
 
 function mapExportTypeToShopifyType(t) {
@@ -564,7 +641,8 @@ function mapExportTypeToShopifyType(t) {
   if (s === "string") return "single_line_text_field";
   if (s === "text") return "multi_line_text_field";
   if (s === "integer" || s === "int") return "number_integer";
-  if (s === "decimal" || s === "float" || s === "number") return "number_decimal";
+  if (s === "decimal" || s === "float" || s === "number")
+    return "number_decimal";
   if (s === "bool") return "boolean";
   if (s === "datetime") return "date_time";
   if (s === "date") return "date";
@@ -574,13 +652,12 @@ function mapExportTypeToShopifyType(t) {
   return s;
 }
 
-const BLOCKED_SEO_KEYS = new Set([
-  "title_tag",
-  "description_tag",
-]);
+const BLOCKED_SEO_KEYS = new Set(["title_tag", "description_tag"]);
 
 function parseMetafieldHeader(header) {
-  let m = header.match(/^Metafield:\s*([\w-]+)\.([\w-]+)\s*\[([^\]]+)\]$/);
+  let m = header.match(
+    /^Metafield:\s*([\w-]+)\.([\w-]+)\s*\[([^\]]+)\]$/
+  );
   if (m) {
     const namespace = m[1];
     const key = m[2];
@@ -625,7 +702,10 @@ async function ensureArticleMetafieldDefinitions(metafields) {
   );
 
   const existing = new Map(
-    data.metafieldDefinitions.nodes.map((d) => [`${d.namespace}.${d.key}`, d.type.name])
+    data.metafieldDefinitions.nodes.map((d) => [
+      `${d.namespace}.${d.key}`,
+      d.type.name,
+    ])
   );
 
   for (const mf of metafields) {
@@ -667,11 +747,16 @@ function loadRowsFromFile(fileBuffer) {
   const wb = XLSX.read(fileBuffer, { type: "buffer" });
 
   const sheetName =
-    wb.SheetNames.find((n) => String(n).trim().toLowerCase() === String(SHEET_NAME).trim().toLowerCase()) ||
-    wb.SheetNames.find((n) => String(n).trim().toLowerCase() === "blog posts");
+    wb.SheetNames.find(
+      (n) =>
+        String(n).trim().toLowerCase() ===
+        String(SHEET_NAME).trim().toLowerCase()
+    ) || wb.SheetNames.find((n) => String(n).trim().toLowerCase() === "blog posts");
 
   if (!sheetName) {
-    throw new Error(`Missing sheet "${SHEET_NAME}". Found: ${wb.SheetNames.join(", ")}`);
+    throw new Error(
+      `Missing sheet "${SHEET_NAME}". Found: ${wb.SheetNames.join(", ")}`
+    );
   }
 
   const sheet = wb.Sheets[sheetName];
@@ -775,7 +860,7 @@ function shouldSkipBlogMetafield(namespace, key) {
 /**
  * BUILD ArticleCreateInput from row
  */
-function buildArticleInputFromRow(row, detectedMetafields, blogId) {
+async function buildArticleInputFromRow(row, detectedMetafields, blogId) {
   const title = row["Title"];
   const bodyHtml = row["Body HTML"];
   const summaryHtml = row["Summary HTML"];
@@ -798,6 +883,7 @@ function buildArticleInputFromRow(row, detectedMetafields, blogId) {
     summary: !isEmpty(summaryHtml) ? String(summaryHtml) : null,
     templateSuffix: !isEmpty(templateSuffix) ? String(templateSuffix) : null,
     handle: !isEmpty(handle) ? String(handle) : "",
+    seo: {}, // ✅ ADDITIVE: prevents runtime crash when setting seo.title/seo.description
   };
 
   if (!isEmpty(imageSrc)) {
@@ -813,6 +899,21 @@ function buildArticleInputFromRow(row, detectedMetafields, blogId) {
     if (isEmpty(raw)) continue;
 
     let value = String(raw);
+    if (mf.type === "list.product_reference") {
+      // If it's a product_reference metafield, we need to fetch the GID by handle
+      const productHandles = String(raw).split(","); // Split the list of product handles
+      const productGids = await Promise.all(
+        productHandles.map((handle) => fetchProductGidByHandle(handle.trim()))
+      );
+
+      // If we have valid GIDs, assign them to the value
+      value = productGids.filter((gid) => gid != null); // Filter out any null GIDs if they weren't found
+      if (value.length === 0) {
+        console.warn(`No valid product GIDs found for handles: ${productHandles}`);
+        continue; // If no valid GIDs, skip this metafield
+      }
+    }
+
     if (mf.type === "boolean") {
       const b = toBool(raw);
       if (b === null) continue;
@@ -823,7 +924,7 @@ function buildArticleInputFromRow(row, detectedMetafields, blogId) {
       namespace: mf.namespace,
       key: mf.key,
       type: mf.type,
-      value,
+      value: typeof value === "object" ? JSON.stringify(value) : value,
     });
   }
 
@@ -861,12 +962,40 @@ async function createArticle(articleInput) {
 }
 
 /**
+ * ✅ NEW: updateArticle() helper (added, nothing removed)
+ * - ArticleUpdateInput does NOT accept blogId, so we remove it from the payload before sending.
+ */
+async function updateArticle(articleId, articleInput) {
+
+  const articleUpdateInput = { ...articleInput };
+  delete articleUpdateInput.blogId;
+  delete articleUpdateInput.seo;
+
+  const data = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    ARTICLE_UPDATE_MUTATION,
+    { id: articleId, article: articleUpdateInput },
+    "articleUpdate"
+  );
+
+  const payload = data.articleUpdate;
+  const errs = payload?.userErrors || [];
+  if (errs.length) {
+    throw new Error(JSON.stringify(errs, null, 2));
+  }
+  return payload.article;
+}
+
+/**
  * MAIN
  */
 export async function syncBlogsAndArticles(req, res) {
   const fileBuffer = req.file?.buffer;
   if (!fileBuffer) {
-    res?.status?.(400)?.json?.({ ok: false, error: "Missing file (req.file.buffer)" });
+    res
+      ?.status?.(400)
+      ?.json?.({ ok: false, error: "Missing file (req.file.buffer)" });
     return;
   }
   console.log("🚀 Starting Blog + Article sync (Sheet → Shopify) [CREATE ONLY] ...");
@@ -919,8 +1048,9 @@ export async function syncBlogsAndArticles(req, res) {
 
   let createdBlogs = 0;
   let createdArticles = 0;
-  let skippedArticles = 0;
+  let skippedArticles = 0; // kept as-is (not removed)
   let failed = 0;
+  let updatedArticles = 0; // ✅ NEW counter added (does not remove anything)
 
   for (let i = 0; i < topRows.length; i++) {
     const row = topRows[i];
@@ -982,32 +1112,42 @@ export async function syncBlogsAndArticles(req, res) {
 
       let existingArticleId = null;
       if (!isEmpty(articleHandle)) {
-        existingArticleId = await findExistingArticleIdByHandleInBlog(blog.id, articleHandle);
+        existingArticleId = await findExistingArticleIdByHandleInBlog(
+          blog.id,
+          articleHandle
+        );
       }
+
+      /**
+       * ✅ UPDATED: Instead of skipping existing article, we UPDATE it.
+       * - We keep skippedArticles counter untouched; it just won't increment here.
+       * - We still keep the old skip-report code in comments? (not required)
+       */
+      const articleInput = await buildArticleInputFromRow(
+        row,
+        detectedMetafields,
+        blog.id
+      );
+
+      let finalArticleId = null;
+      let actionReason = "";
 
       if (existingArticleId) {
-        console.log(`🟡 Article already exists in this blog → ${existingArticleId} (skipping)`);
-        skippedArticles++;
+        console.log(`🟡 Article already exists in this blog → ${existingArticleId} (updating)`);
 
-        reportRows.push({
-          ...baseReportRow,
-          Status: "SUCCESS",
-          Reason: "Article already exists on target store (skipped by handle match)",
-          NewBlogId: blog.id,
-          NewArticleId: existingArticleId,
-          CommentsCreated: "",
-          CommentsFailed: "",
-        });
-        flushReportToDisk();
-        continue;
+        const updated = await updateArticle(existingArticleId, articleInput);
+        updatedArticles++;
+        finalArticleId = updated.id;
+        actionReason = "Article already exists on target store (updated by handle match)";
+
+        console.log(`✅ Updated article: ${updated.id} (${updated.handle})`);
+      } else {
+        const created = await createArticle(articleInput);
+        createdArticles++;
+        finalArticleId = created.id;
+
+        console.log(`✅ Created article: ${created.id} (${created.handle})`);
       }
-
-      const articleInput = buildArticleInputFromRow(row, detectedMetafields, blog.id);
-
-      const created = await createArticle(articleInput);
-      createdArticles++;
-
-      console.log(`✅ Created article: ${created.id} (${created.handle})`);
 
       /* ============================================================
          ✅ CREATE COMMENTS (REST) + APPLY STATUS FROM SHEET
@@ -1017,23 +1157,33 @@ export async function syncBlogsAndArticles(req, res) {
 
       try {
         const blogNumericId = gidToNumericId(blog.id);
-        const articleNumericId = gidToNumericId(created.id);
+        const articleNumericId = gidToNumericId(finalArticleId);
 
         if (!blogNumericId || !articleNumericId) {
-          throw new Error(`Unable to convert GID to numeric id (blog=${blog.id}, article=${created.id})`);
+          throw new Error(
+            `Unable to convert GID to numeric id (blog=${blog.id}, article=${finalArticleId})`
+          );
         }
 
         const commentRows = rows.filter((r) => {
-          if (String(r["Blog: Handle"] || "").trim().toLowerCase() !== blogHandleKey) return false;
+          if (
+            String(r["Blog: Handle"] || "").trim().toLowerCase() !== blogHandleKey
+          ) {
+            return false;
+          }
 
           const h = String(r["Handle"] || "").trim();
           const t = String(r["Title"] || "").trim();
 
           const matchByHandle =
-            !isEmpty(articleHandle) && !isEmpty(h) && h === String(articleHandle).trim();
+            !isEmpty(articleHandle) &&
+            !isEmpty(h) &&
+            h === String(articleHandle).trim();
 
           const matchByTitle =
-            !isEmpty(articleTitle) && !isEmpty(t) && t === String(articleTitle).trim();
+            !isEmpty(articleTitle) &&
+            !isEmpty(t) &&
+            t === String(articleTitle).trim();
 
           if (!matchByHandle && !matchByTitle) return false;
 
@@ -1041,7 +1191,9 @@ export async function syncBlogsAndArticles(req, res) {
         });
 
         if (commentRows.length) {
-          console.log(`💬 Found ${commentRows.length} comment row(s) for this article. Creating...`);
+          console.log(
+            `💬 Found ${commentRows.length} comment row(s) for this article. Creating...`
+          );
         }
 
         for (let c = 0; c < commentRows.length; c++) {
@@ -1068,28 +1220,38 @@ export async function syncBlogsAndArticles(req, res) {
               await applyCommentStatusFromSheet(newComment.id, cr["Comment: Status"]);
             } catch (se) {
               // don't fail comment create if moderation fails
-              console.log(`   - ⚠️ Status set failed for comment ${newComment.id}: ${String(se?.message || se)}`);
+              console.log(
+                `   - ⚠️ Status set failed for comment ${newComment.id}: ${String(
+                  se?.message || se
+                )}`
+              );
             }
 
             commentsCreated++;
             console.log(`   - ✅ Comment #${c + 1} created: ${newComment.id}`);
           } catch (ce) {
             commentsFailed++;
-            console.log(`   - ❌ Comment #${c + 1} failed: ${String(ce?.message || ce)}`);
+            console.log(
+              `   - ❌ Comment #${c + 1} failed: ${String(ce?.message || ce)}`
+            );
           }
 
           await delay(250);
         }
       } catch (commentBlockErr) {
-        console.log(`⚠️ Comments block error: ${String(commentBlockErr?.message || commentBlockErr)}`);
+        console.log(
+          `⚠️ Comments block error: ${String(
+            commentBlockErr?.message || commentBlockErr
+          )}`
+        );
       }
 
       reportRows.push({
         ...baseReportRow,
         Status: "SUCCESS",
-        Reason: "",
+        Reason: actionReason || "",
         NewBlogId: blog.id,
-        NewArticleId: created.id,
+        NewArticleId: finalArticleId,
         CommentsCreated: String(commentsCreated),
         CommentsFailed: String(commentsFailed),
       });
@@ -1118,6 +1280,7 @@ export async function syncBlogsAndArticles(req, res) {
   console.log(`   ✅ Blogs created:    ${createdBlogs}`);
   console.log(`   ✅ Articles created: ${createdArticles}`);
   console.log(`   🟡 Articles skipped: ${skippedArticles}`);
+  console.log(`   🟠 Articles updated: ${updatedArticles}`);
   console.log(`   ❌ Failed:           ${failed}`);
   console.log(`   📄 Report:           ${reportPath}`);
 
@@ -1126,6 +1289,7 @@ export async function syncBlogsAndArticles(req, res) {
     createdBlogs,
     createdArticles,
     skippedArticles,
+    updatedArticles,
     failedCount: failed,
     totalProcessed: topRows.length,
     reportCount: reportRows.length,

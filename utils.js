@@ -25,12 +25,12 @@ export function sanitizeMetafieldsForShopify({
       continue;
     }
 
-    if (isReferenceMetafieldType(mf.type)) {
-      console.log(
-        `ℹ️ [${ownerLabel}] Skipping reference metafield → ${entityLabel} :: ${mf.namespace}.${mf.key} [${mf.type}]`
-      );
-      continue;
-    }
+    // if (isReferenceMetafieldType(mf.type)) {
+    //   console.log(
+    //     `ℹ️ [${ownerLabel}] Skipping reference metafield → ${entityLabel} :: ${mf.namespace}.${mf.key} [${mf.type}]`
+    //   );
+    //   continue;
+    // }
 
     safe.push(mf);
   }
