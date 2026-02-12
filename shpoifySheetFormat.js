@@ -1,1533 +1,3 @@
-//single file read-------------------------------------------------------------------------
-// /**
-//  * Magento/WooCommerce-style XLSX  ->  Shopify “Matrixify-style” Product Import XLSX
-//  *
-//  * ✅ Supports:
-//  * 1) Configurable parents + child rows (parent: product_type=configurable, children: product_type=simple + parent_sku=parent sku)
-//  * 2) Simple products (product_type=simple + no parent_sku) => creates Default Title variant (Option1 Name=Title, Option1 Value=Default Title)
-//  * 3) Configurable products with no children => logs them + still creates a Default Title variant so the product can be imported
-//  *
-//  * ✅ Behavior:
-//  * - Reads req.file.buffer (multer)
-//  * - Converts to Shopify formatted columns (your provided header list)
-//  * - Moves ALL other source columns into Product Metafields and Variant Metafields (namespace: magento)
-//  * - Writes an XLSX output + a logs txt file
-//  * - Returns paths in JSON response
-//  *
-//  * NOTE:
-//  * - Image URLs: if your source sheet contains relative paths (e.g. /a/b.jpg), Shopify needs absolute URLs.
-//  *   This script keeps them as-is and logs a warning when they’re not absolute.
-//  */
-
-// import fs from "fs";
-// import path from "path";
-// import * as XLSX from "xlsx";
-
-// /** ---------- CONFIG ---------- **/
-// const OUTPUT_DIR = path.join(process.cwd(), "tmp", "shopify_exports");
-
-// // Namespace used for metafields:
-// const MF_NAMESPACE = "magento";
-
-// // Keep ALL columns as metafields (can be large). To avoid extreme-width sheets, you can cap:
-// const MAX_PRODUCT_METAFIELDS = 180;
-// const MAX_VARIANT_METAFIELDS = 180;
-
-// // Shopify sheet columns (exact order you provided)
-// const SHOPIFY_COLUMNS = [
-//     "ID",
-//     "Handle",
-//     "Command",
-//     "Title",
-//     "Body HTML",
-//     "Vendor",
-//     "Type",
-//     "Tags",
-//     "Tags Command",
-//     "Created At",
-//     "Updated At",
-//     "Status",
-//     "Published",
-//     "Published At",
-//     "Published Scope",
-//     "Template Suffix",
-//     "Gift Card",
-//     "URL",
-//     "Total Inventory Qty",
-//     "Row #",
-//     "Top Row",
-//     "Category: ID",
-//     "Category: Name",
-//     "Category",
-//     "Custom Collections",
-//     "Smart Collections",
-//     "Image Type",
-//     "Image Src",
-//     "Image Command",
-//     "Image Position",
-//     "Image Width",
-//     "Image Height",
-//     "Image Alt Text",
-//     "Variant Inventory Item ID",
-//     "Variant ID",
-//     "Variant Command",
-//     "Option1 Name",
-//     "Option1 Value",
-//     "Option2 Name",
-//     "Option2 Value",
-//     "Option3 Name",
-//     "Option3 Value",
-//     "Variant Position",
-//     "Variant SKU",
-//     "Variant Barcode",
-//     "Variant Image",
-//     "Variant Weight",
-//     "Variant Weight Unit",
-//     "Variant Price",
-//     "Variant Compare At Price",
-//     "Variant Taxable",
-//     "Variant Tax Code",
-//     "Variant Inventory Tracker",
-//     "Variant Inventory Policy",
-//     "Variant Fulfillment Service",
-//     "Variant Requires Shipping",
-//     "Variant Shipping Profile",
-//     "Variant Inventory Qty",
-//     "Variant Inventory Adjust",
-//     "Variant Cost",
-//     "Variant HS Code",
-//     "Variant Country of Origin",
-//     "Variant Province of Origin",
-//     "Inventory Available: Shop location",
-//     "Inventory Available Adjust: Shop location",
-//     "Inventory On Hand: Shop location",
-//     "Inventory On Hand Adjust: Shop location",
-//     "Inventory Committed: Shop location",
-//     "Inventory Reserved: Shop location",
-//     "Inventory Damaged: Shop location",
-//     "Inventory Damaged Adjust: Shop location",
-//     "Inventory Safety Stock: Shop location",
-//     "Inventory Safety Stock Adjust: Shop location",
-//     "Inventory Quality Control: Shop location",
-//     "Inventory Quality Control Adjust: Shop location",
-//     "Inventory Incoming: Shop location",
-//     "Included / test cat",
-//     "Price / test cat",
-//     "Compare At Price / test cat",
-//     "Metafield: title_tag [string]",
-//     "Metafield: description_tag [string]",
-//     // the rest metafields/variant metafields will be appended dynamically
-// ];
-
-// /** ---------- HELPERS ---------- **/
-// function ensureDir(dir) {
-//     fs.mkdirSync(dir, { recursive: true });
-// }
-
-// function isEmpty(v) {
-//     return v === null || v === undefined || String(v).trim() === "";
-// }
-
-// function toStr(v) {
-//     if (v === null || v === undefined) return "";
-//     return String(v);
-// }
-
-// function safeNumber(v) {
-//     const n = parseFloat(String(v));
-//     return Number.isFinite(n) ? n : 0;
-// }
-
-// function slugify(text) {
-//     return String(text || "")
-//         .toLowerCase()
-//         .trim()
-//         .replace(/['"]/g, "")
-//         .replace(/[^a-z0-9]+/g, "-")
-//         .replace(/-+/g, "-")
-//         .replace(/^-|-$/g, "");
-// }
-
-// function isAbsoluteUrl(u) {
-//     return /^https?:\/\//i.test(String(u || ""));
-// }
-
-// /**
-//  * Shopify metafield key rules: keep it safe, short.
-//  * (Key length in Shopify has limits; we truncate to 30 chars.)
-//  */
-// function toMetafieldKey(colName) {
-//     const k = String(colName || "")
-//         .toLowerCase()
-//         .trim()
-//         .replace(/[^a-z0-9]+/g, "_")
-//         .replace(/^_+|_+$/g, "");
-//     return k.length > 30 ? k.slice(0, 30) : k || "field";
-// }
-
-// function asTags(categories, categoriesStoreName) {
-//     // best-effort tags: combine categories + categories_store_name
-//     const parts = [];
-//     if (!isEmpty(categories)) parts.push(...String(categories).split(","));
-//     if (!isEmpty(categoriesStoreName)) parts.push(...String(categoriesStoreName).split(","));
-//     const tags = parts
-//         .map((t) => t.trim())
-//         .filter(Boolean)
-//         .map((t) => t.replace(/\s+/g, " "));
-//     // unique
-//     return [...new Set(tags)].join(", ");
-// }
-
-// /**
-//  * Parse Magento configurable variations string:
-//  * "sku=CHILD1,connection=Natural Gas|sku=CHILD2,connection=Propane"
-//  */
-// function parseConfigurableVariations(str) {
-//     const map = new Map(); // sku -> { attrCode: value }
-//     if (isEmpty(str)) return map;
-
-//     const parts = String(str).split("|").map((x) => x.trim()).filter(Boolean);
-//     for (const part of parts) {
-//         const pairs = part.split(",").map((x) => x.trim()).filter(Boolean);
-//         let sku = "";
-//         const attrs = {};
-//         for (const p of pairs) {
-//             const idx = p.indexOf("=");
-//             if (idx === -1) continue;
-//             const k = p.slice(0, idx).trim();
-//             const v = p.slice(idx + 1).trim();
-//             if (k === "sku") sku = v;
-//             else attrs[k] = v;
-//         }
-//         if (sku) map.set(sku, attrs);
-//     }
-//     return map;
-// }
-
-// /**
-//  * Parse labels:
-//  * "connection=Connection Type,color=Color"
-//  * -> [{code:'connection', name:'Connection Type'}, ...]
-//  */
-// function parseConfigurableLabels(str) {
-//     const out = [];
-//     if (isEmpty(str)) return out;
-
-//     const parts = String(str).split(",").map((x) => x.trim()).filter(Boolean);
-//     for (const p of parts) {
-//         const idx = p.indexOf("=");
-//         if (idx === -1) continue;
-//         const code = p.slice(0, idx).trim();
-//         const name = p.slice(idx + 1).trim();
-//         if (code && name) out.push({ code, name });
-//     }
-//     return out;
-// }
-
-// function getPriceAndCompare(row) {
-//     const price = safeNumber(row.price);
-//     const special = safeNumber(row.special_price);
-//     // If special price exists and is >0 and less than base price, treat base as compare-at
-//     if (special > 0 && price > 0 && special < price) {
-//         return { price: special, compareAt: price };
-//     }
-//     // otherwise just use price (or special if price is 0)
-//     if (price > 0) return { price, compareAt: "" };
-//     if (special > 0) return { price: special, compareAt: "" };
-//     return { price: "", compareAt: "" };
-// }
-
-// /**
-//  * Decide “active/draft” using product_online if present.
-//  * If product_online is empty, fallback draft.
-//  */
-// function getStatus(row) {
-//     const po = String(row.product_online ?? "").trim();
-//     if (po === "1" || po.toLowerCase() === "yes" || po.toLowerCase() === "true") return "active";
-//     return "draft";
-// }
-
-// function getPublished(row) {
-//     return getStatus(row) === "active" ? "TRUE" : "FALSE";
-// }
-
-// function pickFirstImage(row, logs) {
-//     const img =
-//         row.base_image ||
-//         row.small_image ||
-//         row.thumbnail_image ||
-//         row.swatch_image ||
-//         "";
-//     const src = toStr(img).trim();
-//     if (src && !isAbsoluteUrl(src)) {
-//         logs.push(`WARN: Image is not absolute URL: "${src}" (SKU=${row.sku || "?"})`);
-//     }
-//     return src;
-// }
-
-// /** ---------- MAIN CONVERTER ---------- **/
-// function buildShopifyRowsFromSource(sourceRows) {
-//     console.log("========== START BUILDING SHOPIFY ROWS ==========");
-//     console.log("Incoming rows:", sourceRows.length);
-
-//     const logs = [];
-//     const outRows = [];
-
-//     // normalize keys (XLSX sometimes gives weird header whitespace)
-//     const headers = Object.keys(sourceRows[0] || {}).map((h) => String(h).trim());
-//     const normalizedRows = sourceRows.map((r) => {
-//         const o = {};
-//         for (const k of Object.keys(r)) o[String(k).trim()] = r[k];
-//         return o;
-//     });
-
-//     // Index rows
-//     const bySku = new Map();
-//     const childrenByParentSku = new Map();
-//     const parents = [];
-
-//     for (const r of normalizedRows) {
-//         if (rowIndex % 5000 === 0) {
-//             console.log("Indexing rows:", rowIndex, "/", normalizedRows.length);
-//         }
-
-//         const sku = toStr(r.sku).trim();
-//         if (sku) bySku.set(sku, r);
-
-//         const pt = toStr(r.product_type).trim().toLowerCase();
-//         const parentSku = toStr(r.parent_sku).trim();
-
-//         if (pt === "configurable") parents.push(r);
-
-//         if (!isEmpty(parentSku)) {
-//             if (!childrenByParentSku.has(parentSku)) childrenByParentSku.set(parentSku, []);
-//             childrenByParentSku.get(parentSku).push(r);
-//         }
-//     }
-
-//     // Determine which columns become metafields (everything except what we directly map)
-//     const DIRECT_USED_COLUMNS = new Set([
-//         "sku",
-//         "product_type",
-//         "parent_sku",
-//         "name",
-//         "description",
-//         "short_description",
-//         "url_key",
-//         "created_at",
-//         "updated_at",
-//         "price",
-//         "special_price",
-//         "qty",
-//         "weight",
-//         "tax_class_name",
-//         "visibility",
-//         "product_online",
-//         "categories",
-//         "categories_store_name",
-//         "category_ids",
-//         "meta_title",
-//         "meta_description",
-//         "base_image",
-//         "small_image",
-//         "thumbnail_image",
-//         "swatch_image",
-//         "additional_images",
-//         "configurable_variations",
-//         "configurable_variation_labels",
-//     ]);
-
-//     // Columns eligible for metafields = all headers not directly used and that have at least one non-empty value
-//     const eligible = [];
-//     for (const h of headers) {
-//         if (DIRECT_USED_COLUMNS.has(h)) continue;
-//         let hasValue = false;
-//         for (const r of normalizedRows) {
-//             if (!isEmpty(r[h])) {
-//                 hasValue = true;
-//                 break;
-//             }
-//         }
-//         if (hasValue) eligible.push(h);
-//     }
-
-//     // Split into product vs variant metafields:
-//     // - For simplicity: we put ALL eligible columns into BOTH product+variant, but you’ll get duplicates.
-//     // Better: treat child-only columns as variant metafields by checking presence on any child row.
-//     const productMetafieldCols = [];
-//     const variantMetafieldCols = [];
-
-//     for (const h of eligible) {
-//         let presentOnParentOrSimple = false;
-//         let presentOnChild = false;
-//         for (const r of normalizedRows) {
-//             const pt = toStr(r.product_type).trim().toLowerCase();
-//             const isChild = pt === "simple" && !isEmpty(r.parent_sku);
-//             const isSimple = pt === "simple" && isEmpty(r.parent_sku);
-//             const isParent = pt === "configurable";
-//             if (isEmpty(r[h])) continue;
-//             if (isChild) presentOnChild = true;
-//             if (isParent || isSimple) presentOnParentOrSimple = true;
-//         }
-//         if (presentOnParentOrSimple) productMetafieldCols.push(h);
-//         if (presentOnChild) variantMetafieldCols.push(h);
-//     }
-
-//     // Cap extremely-wide sheets to avoid unusable output
-//     const productMfFinal = productMetafieldCols.slice(0, MAX_PRODUCT_METAFIELDS);
-//     const variantMfFinal = variantMetafieldCols.slice(0, MAX_VARIANT_METAFIELDS);
-
-//     if (productMetafieldCols.length > productMfFinal.length) {
-//         logs.push(
-//             `WARN: Product metafields capped at ${MAX_PRODUCT_METAFIELDS}. Dropped ${productMetafieldCols.length - productMfFinal.length} columns.`
-//         );
-//     }
-//     if (variantMetafieldCols.length > variantMfFinal.length) {
-//         logs.push(
-//             `WARN: Variant metafields capped at ${MAX_VARIANT_METAFIELDS}. Dropped ${variantMetafieldCols.length - variantMfFinal.length} columns.`
-//         );
-//     }
-
-//     // Build dynamic Shopify metafield columns
-//     const productMfColumns = productMfFinal.map((col) => {
-//         const key = toMetafieldKey(col);
-//         return `Metafield: ${MF_NAMESPACE}.${key} [string]`;
-//     });
-
-//     const variantMfColumns = variantMfFinal.map((col) => {
-//         const key = toMetafieldKey(col);
-//         return `Variant Metafield: ${MF_NAMESPACE}.${key} [string]`;
-//     });
-
-//     // Final header for output
-//     const outputHeader = [...SHOPIFY_COLUMNS, ...productMfColumns, ...variantMfColumns];
-
-//     let rowNum = 1;
-
-//     function makeBaseRow() {
-//         const o = {};
-//         for (const c of outputHeader) o[c] = "";
-//         o["Row #"] = rowNum;
-//         return o;
-//     }
-
-//     function attachProductMetafields(outRow, sourceRow) {
-//         productMfFinal.forEach((col, idx) => {
-//             const val = sourceRow[col];
-//             if (!isEmpty(val)) outRow[productMfColumns[idx]] = toStr(val);
-//         });
-//     }
-
-//     function attachVariantMetafields(outRow, sourceRow) {
-//         variantMfFinal.forEach((col, idx) => {
-//             const val = sourceRow[col];
-//             if (!isEmpty(val)) outRow[variantMfColumns[idx]] = toStr(val);
-//         });
-//     }
-
-//     // ---- SIMPLE PRODUCTS (no parent_sku) ----
-//     console.log("Processing SIMPLE products...");
-
-//     for (const r of normalizedRows) {
-
-
-
-//         const pt = toStr(r.product_type).trim().toLowerCase();
-//         const parentSku = toStr(r.parent_sku).trim();
-//         if (pt !== "simple" || !isEmpty(parentSku)) continue;
-
-//         const handle = toStr(r.url_key).trim() ? slugify(r.url_key) : slugify(r.name || r.sku);
-//         const { price, compareAt } = getPriceAndCompare(r);
-//         const qty = safeNumber(r.qty);
-
-//         const out = makeBaseRow();
-//         out["Handle"] = handle;
-//         out["Top Row"] = 1;
-
-//         out["Title"] = toStr(r.name);
-//         out["Body HTML"] = toStr(r.description || r.short_description);
-//         out["Status"] = getStatus(r);
-//         out["Published"] = getPublished(r);
-//         out["Created At"] = toStr(r.created_at);
-//         out["Updated At"] = toStr(r.updated_at);
-
-//         out["Tags"] = asTags(r.categories, r.categories_store_name);
-
-//         // Meta title/description into Shopify “Metafield title_tag / description_tag”
-//         out["Metafield: title_tag [string]"] = toStr(r.meta_title);
-//         out["Metafield: description_tag [string]"] = toStr(r.meta_description);
-
-//         // Image
-//         const img = pickFirstImage(r, logs);
-//         if (img) {
-//             out["Image Src"] = img;
-//             out["Image Position"] = 1;
-//         }
-
-//         // Variant defaults for simple products
-//         out["Option1 Name"] = "Title";
-//         out["Option1 Value"] = "Default Title";
-
-//         out["Variant SKU"] = toStr(r.sku);
-//         out["Variant Price"] = price === "" ? "" : String(price);
-//         out["Variant Compare At Price"] = compareAt === "" ? "" : String(compareAt);
-//         out["Variant Inventory Qty"] = String(qty || 0);
-
-//         const w = safeNumber(r.weight);
-//         if (w > 0) {
-//             out["Variant Weight"] = String(w);
-//             out["Variant Weight Unit"] = "lb"; // change if your source weight is in kg
-//         }
-
-//         // Shopify inventory tracker/policy best defaults
-//         out["Variant Inventory Tracker"] = "shopify";
-//         out["Variant Inventory Policy"] = "deny";
-//         out["Variant Requires Shipping"] = "TRUE";
-//         out["Variant Taxable"] = "TRUE";
-
-//         attachProductMetafields(out, r);
-//         attachVariantMetafields(out, r);
-
-//         outRows.push(out);
-//         rowNum += 1;
-//     }
-
-//     // ---- CONFIGURABLE PARENTS ----
-//     for (const parent of parents) {
-//         console.log("Processing CONFIGURABLE parents...");
-//         console.log("Total parents:", parents.length);
-
-//         const parentSku = toStr(parent.sku).trim();
-//         const handleBase = toStr(parent.url_key).trim() ? slugify(parent.url_key) : slugify(parent.name || parentSku);
-//         let handle = handleBase || slugify(parentSku);
-//         if (!handle) handle = slugify(parentSku || `product-${rowNum}`);
-
-//         // Get children by parent_sku
-//         const children = (childrenByParentSku.get(parentSku) || []).slice();
-
-//         // Parse option labels + mapping sku->option-values from configurable strings
-//         const labelList = parseConfigurableLabels(parent.configurable_variation_labels);
-//         const variationMap = parseConfigurableVariations(parent.configurable_variations);
-
-//         // If Magento didn’t provide labels, but variations have keys, infer names from keys
-//         let optionDefs = labelList;
-//         if (!optionDefs.length && variationMap.size) {
-//             const first = variationMap.values().next().value || {};
-//             optionDefs = Object.keys(first).slice(0, 3).map((code) => ({ code, name: code }));
-//             logs.push(`WARN: No configurable_variation_labels for parent SKU=${parentSku}. Inferred options from variations keys.`);
-//         }
-
-//         // If parent is configurable but no children, log and still create one default variant
-//         if (!children.length) {
-//             logs.push(`INFO: Configurable parent has NO children rows. SKU=${parentSku} (will create Default Title variant)`);
-//             const { price, compareAt } = getPriceAndCompare(parent);
-//             const qty = safeNumber(parent.qty);
-
-//             const out = makeBaseRow();
-//             out["Handle"] = handle;
-//             out["Top Row"] = 1;
-
-//             out["Title"] = toStr(parent.name);
-//             out["Body HTML"] = toStr(parent.description || parent.short_description);
-//             out["Status"] = getStatus(parent);
-//             out["Published"] = getPublished(parent);
-//             out["Created At"] = toStr(parent.created_at);
-//             out["Updated At"] = toStr(parent.updated_at);
-
-//             out["Tags"] = asTags(parent.categories, parent.categories_store_name);
-
-//             out["Metafield: title_tag [string]"] = toStr(parent.meta_title);
-//             out["Metafield: description_tag [string]"] = toStr(parent.meta_description);
-
-//             const img = pickFirstImage(parent, logs);
-//             if (img) {
-//                 out["Image Src"] = img;
-//                 out["Image Position"] = 1;
-//             }
-
-//             out["Option1 Name"] = "Title";
-//             out["Option1 Value"] = "Default Title";
-
-//             out["Variant SKU"] = parentSku;
-//             out["Variant Price"] = price === "" ? "" : String(price);
-//             out["Variant Compare At Price"] = compareAt === "" ? "" : String(compareAt);
-//             out["Variant Inventory Qty"] = String(qty || 0);
-
-//             out["Variant Inventory Tracker"] = "shopify";
-//             out["Variant Inventory Policy"] = "deny";
-//             out["Variant Requires Shipping"] = "TRUE";
-//             out["Variant Taxable"] = "TRUE";
-
-//             attachProductMetafields(out, parent);
-//             attachVariantMetafields(out, parent);
-
-//             outRows.push(out);
-//             rowNum += 1;
-//             continue;
-//         }
-
-//         // Otherwise, create one Shopify product with multiple variant rows (top row = first variant row)
-//         // Sort children stable by SKU to keep deterministic output
-//         children.sort((a, b) => toStr(a.sku).localeCompare(toStr(b.sku)));
-
-//         for (let i = 0; i < children.length; i++) {
-//             const child = children[i];
-//             const childSku = toStr(child.sku).trim();
-
-//             const out = makeBaseRow();
-//             out["Handle"] = handle;
-
-//             const isTop = i === 0;
-//             out["Top Row"] = isTop ? 1 : "";
-
-//             if (isTop) {
-//                 out["Title"] = toStr(parent.name);
-//                 out["Body HTML"] = toStr(parent.description || parent.short_description);
-//                 out["Status"] = getStatus(parent);
-//                 out["Published"] = getPublished(parent);
-//                 out["Created At"] = toStr(parent.created_at);
-//                 out["Updated At"] = toStr(parent.updated_at);
-//                 out["Tags"] = asTags(parent.categories, parent.categories_store_name);
-//                 out["Metafield: title_tag [string]"] = toStr(parent.meta_title);
-//                 out["Metafield: description_tag [string]"] = toStr(parent.meta_description);
-
-//                 const img = pickFirstImage(parent, logs);
-//                 if (img) {
-//                     out["Image Src"] = img;
-//                     out["Image Position"] = 1;
-//                 }
-
-//                 attachProductMetafields(out, parent);
-//             }
-
-//             // Variant details
-//             const { price, compareAt } = getPriceAndCompare(child);
-//             const qty = safeNumber(child.qty);
-
-//             out["Variant SKU"] = childSku;
-//             out["Variant Price"] = price === "" ? "" : String(price);
-//             out["Variant Compare At Price"] = compareAt === "" ? "" : String(compareAt);
-//             out["Variant Inventory Qty"] = String(qty || 0);
-//             out["Variant Position"] = String(i + 1);
-
-//             // Variant image (use child image first, else blank)
-//             const vImg = pickFirstImage(child, logs);
-//             if (vImg) out["Variant Image"] = vImg;
-
-//             const w = safeNumber(child.weight);
-//             if (w > 0) {
-//                 out["Variant Weight"] = String(w);
-//                 out["Variant Weight Unit"] = "lb"; // adjust if needed
-//             }
-
-//             // Options (up to 3)
-//             const attrs = variationMap.get(childSku) || null;
-//             if (!attrs) {
-//                 logs.push(
-//                     `WARN: Could not find option values for child SKU=${childSku} under parent SKU=${parentSku}. (configurable_variations mismatch)`
-//                 );
-//             }
-
-//             for (let oi = 0; oi < 3; oi++) {
-//                 const def = optionDefs[oi];
-//                 if (!def) break;
-
-//                 out[`Option${oi + 1} Name`] = def.name;
-
-//                 const val = attrs?.[def.code];
-//                 out[`Option${oi + 1} Value`] = !isEmpty(val) ? toStr(val) : "";
-//             }
-
-//             // If no option defs at all, fallback to Default Title (otherwise Shopify may reject)
-//             if (!optionDefs.length) {
-//                 out["Option1 Name"] = "Title";
-//                 out["Option1 Value"] = "Default Title";
-//             }
-
-//             out["Variant Inventory Tracker"] = "shopify";
-//             out["Variant Inventory Policy"] = "deny";
-//             out["Variant Requires Shipping"] = "TRUE";
-//             out["Variant Taxable"] = "TRUE";
-
-//             attachVariantMetafields(out, child);
-
-//             outRows.push(out);
-//             rowNum += 1;
-//         }
-//     }
-
-//     // If there are child rows that reference a parent that does not exist, log them
-//     for (const [pSku, childs] of childrenByParentSku.entries()) {
-//         if (!bySku.has(pSku)) {
-//             logs.push(`WARN: Found child rows with parent_sku=${pSku} but no parent row exists in file. Children count=${childs.length}`);
-//         }
-//     }
-
-//     return { outputHeader, outRows, logs };
-// }
-
-// /** ---------- EXPRESS HANDLER ---------- **/
-// export async function convertToShopifySheet(req, res) {
-//     try {
-//         if (!req?.file?.buffer) {
-//             return res.status(400).json({ status: false, message: "Missing file buffer. Please upload XLSX as multipart/form-data (field name: file)." });
-//         }
-
-//         console.log("========== FILE RECEIVED ==========");
-//         console.log("Buffer size (MB):", (req.file.buffer.length / 1024 / 1024).toFixed(2));
-//         console.log("Start Time:", new Date().toISOString());
-
-//         ensureDir(OUTPUT_DIR);
-
-//         // 1) Read source workbook from buffer
-//         console.log("Reading workbook from buffer...");
-
-//         const wb = XLSX.read(req.file.buffer, { type: "buffer" });
-//         console.log("Workbook loaded.");
-//         console.log("Available sheets:", wb.SheetNames);
-
-//         const sheetName = wb.SheetNames[0];
-//         if (!sheetName) {
-//             return res.status(400).json({ status: false, message: "No sheet found in XLSX." });
-//         }
-
-//         const ws = wb.Sheets[sheetName];
-
-//         // defval: keep empty cells as ""
-//         console.log("Converting sheet to JSON...");
-
-//         const sourceRows = XLSX.utils.sheet_to_json(ws, { defval: "" });
-//         console.log("Sheet converted.");
-//         console.log("Total source rows:", sourceRows.length);
-//         console.log("Memory Usage (MB):", (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2));
-
-
-//         if (!sourceRows.length) {
-//             return res.status(400).json({ status: false, message: "Sheet is empty." });
-//         }
-
-//         // 2) Convert
-//         const { outputHeader, outRows, logs } = buildShopifyRowsFromSource(sourceRows);
-
-//         // 3) Write output XLSX
-//         const outWb = XLSX.utils.book_new();
-//         const outWs = XLSX.utils.json_to_sheet(outRows, { header: outputHeader });
-//         XLSX.utils.book_append_sheet(outWb, outWs, "Shopify Products");
-
-//         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-//         const outPath = path.join(OUTPUT_DIR, `shopify_products_${stamp}.xlsx`);
-//         console.log("Total Shopify output rows:", outRows.length);
-//         console.log("Writing output XLSX...");
-
-//         XLSX.writeFile(outWb, outPath);
-//         console.log("Shopify sheet written at:", outPath);
-//         console.log("Writing logs file...");
-
-
-//         // 4) Write logs
-//         const logPath = path.join(OUTPUT_DIR, `shopify_products_${stamp}_logs.txt`);
-//         fs.writeFileSync(logPath, logs.join("\n"), "utf8");
-//         console.log("========== CONVERSION COMPLETE ==========");
-//         console.log("End Time:", new Date().toISOString());
-//         console.log("Final Memory Usage (MB):", (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2));
-
-
-//         return res.json({
-//             status: true,
-//             message: "Converted to Shopify formatted sheet.",
-//             result: {
-//                 shopifySheetPath: outPath,
-//                 logsPath: logPath,
-//                 stats: {
-//                     sourceRows: sourceRows.length,
-//                     outputRows: outRows.length,
-//                     productMetafieldColumnsAdded: outputHeader.filter((h) => h.startsWith("Metafield: ")).length,
-//                     variantMetafieldColumnsAdded: outputHeader.filter((h) => h.startsWith("Variant Metafield: ")).length,
-//                     logsCount: logs.length,
-//                 },
-//             },
-//         });
-//     } catch (err) {
-//         return res.status(500).json({
-//             status: false,
-//             message: "Internal server error.",
-//             result: { error: err?.message || String(err) },
-//         });
-//     }
-// }
-
-//chunk file read but orphan-------------------------------------------------------------------------
-
-
-/**
- * STREAMING VERSION (chunks):
- * - Reads input XLSX row-by-row using ExcelJS WorkbookReader
- * - Writes output XLSX row-by-row using ExcelJS WorkbookWriter
- *
- * This avoids XLSX.sheet_to_json which explodes memory for 300MB files.
- */
-
-// import fs from "fs";
-// import path from "path";
-// import ExcelJS from "exceljs";
-// import { Readable } from "stream";
-
-// /** ---------- CONFIG ---------- **/
-// const OUTPUT_DIR = path.join(process.cwd(), "tmp", "shopify_exports");
-// const MF_NAMESPACE = "magento";
-
-// const MAX_PRODUCT_METAFIELDS = 180;
-// const MAX_VARIANT_METAFIELDS = 180;
-
-// // Shopify columns (same as you provided)
-// const SHOPIFY_COLUMNS = [
-//     "ID",
-//     "Handle",
-//     "Command",
-//     "Title",
-//     "Body HTML",
-//     "Vendor",
-//     "Type",
-//     "Tags",
-//     "Tags Command",
-//     "Created At",
-//     "Updated At",
-//     "Status",
-//     "Published",
-//     "Published At",
-//     "Published Scope",
-//     "Template Suffix",
-//     "Gift Card",
-//     "URL",
-//     "Total Inventory Qty",
-//     "Row #",
-//     "Top Row",
-//     "Category: ID",
-//     "Category: Name",
-//     "Category",
-//     "Custom Collections",
-//     "Smart Collections",
-//     "Image Type",
-//     "Image Src",
-//     "Image Command",
-//     "Image Position",
-//     "Image Width",
-//     "Image Height",
-//     "Image Alt Text",
-//     "Variant Inventory Item ID",
-//     "Variant ID",
-//     "Variant Command",
-//     "Option1 Name",
-//     "Option1 Value",
-//     "Option2 Name",
-//     "Option2 Value",
-//     "Option3 Name",
-//     "Option3 Value",
-//     "Variant Position",
-//     "Variant SKU",
-//     "Variant Barcode",
-//     "Variant Image",
-//     "Variant Weight",
-//     "Variant Weight Unit",
-//     "Variant Price",
-//     "Variant Compare At Price",
-//     "Variant Taxable",
-//     "Variant Tax Code",
-//     "Variant Inventory Tracker",
-//     "Variant Inventory Policy",
-//     "Variant Fulfillment Service",
-//     "Variant Requires Shipping",
-//     "Variant Shipping Profile",
-//     "Variant Inventory Qty",
-//     "Variant Inventory Adjust",
-//     "Variant Cost",
-//     "Variant HS Code",
-//     "Variant Country of Origin",
-//     "Variant Province of Origin",
-//     "Inventory Available: Shop location",
-//     "Inventory Available Adjust: Shop location",
-//     "Inventory On Hand: Shop location",
-//     "Inventory On Hand Adjust: Shop location",
-//     "Inventory Committed: Shop location",
-//     "Inventory Reserved: Shop location",
-//     "Inventory Damaged: Shop location",
-//     "Inventory Damaged Adjust: Shop location",
-//     "Inventory Safety Stock: Shop location",
-//     "Inventory Safety Stock Adjust: Shop location",
-//     "Inventory Quality Control: Shop location",
-//     "Inventory Quality Control Adjust: Shop location",
-//     "Inventory Incoming: Shop location",
-//     "Included / test cat",
-//     "Price / test cat",
-//     "Compare At Price / test cat",
-//     "Metafield: title_tag [string]",
-//     "Metafield: description_tag [string]",
-// ];
-
-// /** ---------- HELPERS ---------- **/
-// function ensureDir(dir) {
-//     fs.mkdirSync(dir, { recursive: true });
-// }
-
-// function isEmpty(v) {
-//     return v === null || v === undefined || String(v).trim() === "";
-// }
-
-// function toStr(v) {
-//     if (v === null || v === undefined) return "";
-//     return String(v);
-// }
-
-// function safeNumber(v) {
-//     const n = parseFloat(String(v));
-//     return Number.isFinite(n) ? n : 0;
-// }
-
-// function slugify(text) {
-//     return String(text || "")
-//         .toLowerCase()
-//         .trim()
-//         .replace(/['"]/g, "")
-//         .replace(/[^a-z0-9]+/g, "-")
-//         .replace(/-+/g, "-")
-//         .replace(/^-|-$/g, "");
-// }
-
-// function isAbsoluteUrl(u) {
-//     return /^https?:\/\//i.test(String(u || ""));
-// }
-
-// function toMetafieldKey(colName) {
-//     const k = String(colName || "")
-//         .toLowerCase()
-//         .trim()
-//         .replace(/[^a-z0-9]+/g, "_")
-//         .replace(/^_+|_+$/g, "");
-//     return k.length > 30 ? k.slice(0, 30) : k || "field";
-// }
-
-// function asTags(categories, categoriesStoreName) {
-//     const parts = [];
-//     if (!isEmpty(categories)) parts.push(...String(categories).split(","));
-//     if (!isEmpty(categoriesStoreName)) parts.push(...String(categoriesStoreName).split(","));
-//     const tags = parts
-//         .map((t) => t.trim())
-//         .filter(Boolean)
-//         .map((t) => t.replace(/\s+/g, " "));
-//     return [...new Set(tags)].join(", ");
-// }
-
-// function parseConfigurableVariations(str) {
-//     const map = new Map(); // sku -> { attrCode: value }
-//     if (isEmpty(str)) return map;
-
-//     const parts = String(str)
-//         .split("|")
-//         .map((x) => x.trim())
-//         .filter(Boolean);
-
-//     for (const part of parts) {
-//         const pairs = part
-//             .split(",")
-//             .map((x) => x.trim())
-//             .filter(Boolean);
-
-//         let sku = "";
-//         const attrs = {};
-//         for (const p of pairs) {
-//             const idx = p.indexOf("=");
-//             if (idx === -1) continue;
-//             const k = p.slice(0, idx).trim();
-//             const v = p.slice(idx + 1).trim();
-//             if (k === "sku") sku = v;
-//             else attrs[k] = v;
-//         }
-//         if (sku) map.set(sku, attrs);
-//     }
-//     return map;
-// }
-
-// function parseConfigurableLabels(str) {
-//     const out = [];
-//     if (isEmpty(str)) return out;
-
-//     const parts = String(str)
-//         .split(",")
-//         .map((x) => x.trim())
-//         .filter(Boolean);
-
-//     for (const p of parts) {
-//         const idx = p.indexOf("=");
-//         if (idx === -1) continue;
-//         const code = p.slice(0, idx).trim();
-//         const name = p.slice(idx + 1).trim();
-//         if (code && name) out.push({ code, name });
-//     }
-//     return out;
-// }
-
-// function getPriceAndCompare(row) {
-//     const price = safeNumber(row.price);
-//     const special = safeNumber(row.special_price);
-
-//     if (special > 0 && price > 0 && special < price) {
-//         return { price: special, compareAt: price };
-//     }
-//     if (price > 0) return { price, compareAt: "" };
-//     if (special > 0) return { price: special, compareAt: "" };
-//     return { price: "", compareAt: "" };
-// }
-
-// function getStatus(row) {
-//     const po = String(row.product_online ?? "").trim();
-//     if (po === "1" || po.toLowerCase() === "yes" || po.toLowerCase() === "true") return "active";
-//     return "draft";
-// }
-
-// function getPublished(row) {
-//     return getStatus(row) === "active" ? "TRUE" : "FALSE";
-// }
-
-// function pickFirstImage(row, logs) {
-//     const img = row.base_image || row.small_image || row.thumbnail_image || row.swatch_image || "";
-//     const src = toStr(img).trim();
-//     if (src && !isAbsoluteUrl(src)) {
-//         logs.push(`WARN: Image is not absolute URL: "${src}" (SKU=${row.sku || "?"})`);
-//     }
-//     return src;
-// }
-
-// function makeEmptyRowObj(header) {
-//     const o = {};
-//     for (const c of header) o[c] = "";
-//     return o;
-// }
-
-// /**
-//  * Convert ExcelJS row values -> object using headers array
-//  * headers: ["sku","name",...]
-//  * values: [ , cell1, cell2 ... ]  (ExcelJS is 1-indexed)
-//  */
-// function rowToObject(headers, rowValues) {
-//     const obj = {};
-//     for (let i = 0; i < headers.length; i++) {
-//         const key = headers[i];
-//         // ExcelJS row.values is 1-indexed; header index i corresponds to col i+1
-//         obj[key] = rowValues[i + 1] ?? "";
-//     }
-//     return obj;
-// }
-
-// /** ---------- STREAMING CONVERTER ---------- **/
-// async function convertBufferToShopifyXlsxStreaming(buffer) {
-//     console.log("========== START BUILDING SHOPIFY ROWS (STREAM) ==========");
-
-//     const logs = [];
-//     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-//     ensureDir(OUTPUT_DIR);
-
-//     const outPath = path.join(OUTPUT_DIR, `shopify_products_${stamp}.xlsx`);
-//     const logPath = path.join(OUTPUT_DIR, `shopify_products_${stamp}_logs.txt`);
-
-//     // Writer (streaming)
-//     const outWb = new ExcelJS.stream.xlsx.WorkbookWriter({
-//         filename: outPath,
-//         useStyles: false,
-//         useSharedStrings: true,
-//     });
-//     const outWs = outWb.addWorksheet("Shopify Products");
-
-//     // Reader (streaming)
-//     const inputStream = Readable.from(buffer);
-//     const reader = new ExcelJS.stream.xlsx.WorkbookReader(inputStream, {
-//         worksheets: "emit",
-//         sharedStrings: "cache",
-//         hyperlinks: "ignore",
-//         styles: "ignore",
-//         entries: "emit",
-//     });
-
-//     // We will build headers + metafield columns from the *header row only* (fast).
-//     let inputHeaders = null; // normalized input headers
-//     let outputHeader = null;
-
-//     // Metafield column mapping decided from input headers (not from scanning values)
-//     let productMfFinal = [];
-//     let variantMfFinal = [];
-//     let productMfColumns = [];
-//     let variantMfColumns = [];
-
-//     const DIRECT_USED_COLUMNS = new Set([
-//         "sku",
-//         "product_type",
-//         "parent_sku",
-//         "name",
-//         "description",
-//         "short_description",
-//         "url_key",
-//         "created_at",
-//         "updated_at",
-//         "price",
-//         "special_price",
-//         "qty",
-//         "weight",
-//         "tax_class_name",
-//         "visibility",
-//         "product_online",
-//         "categories",
-//         "categories_store_name",
-//         "category_ids",
-//         "meta_title",
-//         "meta_description",
-//         "base_image",
-//         "small_image",
-//         "thumbnail_image",
-//         "swatch_image",
-//         "additional_images",
-//         "configurable_variations",
-//         "configurable_variation_labels",
-//     ]);
-
-//     // Streaming grouping state
-//     let rowNum = 1;
-//     let totalReadRows = 0;
-//     let totalOutputRows = 0;
-
-//     let currentParent = null; // parent row object
-//     let currentParentSku = "";
-//     let currentParentChildren = []; // children row objects
-
-//     // If a child appears before its parent (rare), we log it.
-//     let orphanChildrenCount = 0;
-
-//     function writeRow(obj) {
-//         // write in correct column order
-//         const values = outputHeader.map((h) => obj[h] ?? "");
-//         outWs.addRow(values).commit();
-//         totalOutputRows++;
-
-//         if (totalOutputRows % 5000 === 0) {
-//             console.log("Output rows written:", totalOutputRows);
-//         }
-//     }
-
-//     function attachProductMetafields(outRow, sourceRow) {
-//         for (let i = 0; i < productMfFinal.length; i++) {
-//             const col = productMfFinal[i];
-//             const v = sourceRow[col];
-//             if (!isEmpty(v)) outRow[productMfColumns[i]] = toStr(v);
-//         }
-//     }
-
-//     function attachVariantMetafields(outRow, sourceRow) {
-//         for (let i = 0; i < variantMfFinal.length; i++) {
-//             const col = variantMfFinal[i];
-//             const v = sourceRow[col];
-//             if (!isEmpty(v)) outRow[variantMfColumns[i]] = toStr(v);
-//         }
-//     }
-
-//     function flushCurrentParentGroup() {
-//         if (!currentParent) return;
-
-//         const parent = currentParent;
-//         const parentSku = currentParentSku;
-//         const children = currentParentChildren;
-
-//         // If configurable with no children
-//         if (!children.length) {
-//             logs.push(`INFO: Configurable parent has NO children rows. SKU=${parentSku} (will create Default Title variant)`);
-
-//             const handleBase = toStr(parent.url_key).trim() ? slugify(parent.url_key) : slugify(parent.name || parentSku);
-//             const handle = handleBase || slugify(parentSku || `product-${rowNum}`);
-
-//             const { price, compareAt } = getPriceAndCompare(parent);
-//             const qty = safeNumber(parent.qty);
-
-//             const out = makeEmptyRowObj(outputHeader);
-//             out["Row #"] = rowNum;
-//             out["Top Row"] = 1;
-//             out["Handle"] = handle;
-
-//             out["Title"] = toStr(parent.name);
-//             out["Body HTML"] = toStr(parent.description || parent.short_description);
-//             out["Status"] = getStatus(parent);
-//             out["Published"] = getPublished(parent);
-//             out["Created At"] = toStr(parent.created_at);
-//             out["Updated At"] = toStr(parent.updated_at);
-//             out["Tags"] = asTags(parent.categories, parent.categories_store_name);
-
-//             out["Metafield: title_tag [string]"] = toStr(parent.meta_title);
-//             out["Metafield: description_tag [string]"] = toStr(parent.meta_description);
-
-//             const img = pickFirstImage(parent, logs);
-//             if (img) {
-//                 out["Image Src"] = img;
-//                 out["Image Position"] = 1;
-//             }
-
-//             out["Option1 Name"] = "Title";
-//             out["Option1 Value"] = "Default Title";
-
-//             out["Variant SKU"] = parentSku;
-//             out["Variant Price"] = price === "" ? "" : String(price);
-//             out["Variant Compare At Price"] = compareAt === "" ? "" : String(compareAt);
-//             out["Variant Inventory Qty"] = String(qty || 0);
-
-//             const w = safeNumber(parent.weight);
-//             if (w > 0) {
-//                 out["Variant Weight"] = String(w);
-//                 out["Variant Weight Unit"] = "lb";
-//             }
-
-//             out["Variant Inventory Tracker"] = "shopify";
-//             out["Variant Inventory Policy"] = "deny";
-//             out["Variant Requires Shipping"] = "TRUE";
-//             out["Variant Taxable"] = "TRUE";
-
-//             attachProductMetafields(out, parent);
-//             attachVariantMetafields(out, parent);
-
-//             writeRow(out);
-//             rowNum++;
-//         } else {
-//             // Configurable with children
-//             const handleBase = toStr(parent.url_key).trim() ? slugify(parent.url_key) : slugify(parent.name || parentSku);
-//             const handle = handleBase || slugify(parentSku || `product-${rowNum}`);
-
-//             const labelList = parseConfigurableLabels(parent.configurable_variation_labels);
-//             const variationMap = parseConfigurableVariations(parent.configurable_variations);
-
-//             let optionDefs = labelList;
-//             if (!optionDefs.length && variationMap.size) {
-//                 const first = variationMap.values().next().value || {};
-//                 optionDefs = Object.keys(first).slice(0, 3).map((code) => ({ code, name: code }));
-//                 logs.push(`WARN: No configurable_variation_labels for parent SKU=${parentSku}. Inferred options from variations keys.`);
-//             }
-
-//             // stable order by sku
-//             children.sort((a, b) => toStr(a.sku).localeCompare(toStr(b.sku)));
-
-//             for (let i = 0; i < children.length; i++) {
-//                 const child = children[i];
-//                 const childSku = toStr(child.sku).trim();
-
-//                 const out = makeEmptyRowObj(outputHeader);
-//                 out["Row #"] = rowNum;
-//                 out["Handle"] = handle;
-//                 out["Variant Position"] = String(i + 1);
-
-//                 const isTop = i === 0;
-//                 out["Top Row"] = isTop ? 1 : "";
-
-//                 if (isTop) {
-//                     out["Title"] = toStr(parent.name);
-//                     out["Body HTML"] = toStr(parent.description || parent.short_description);
-//                     out["Status"] = getStatus(parent);
-//                     out["Published"] = getPublished(parent);
-//                     out["Created At"] = toStr(parent.created_at);
-//                     out["Updated At"] = toStr(parent.updated_at);
-//                     out["Tags"] = asTags(parent.categories, parent.categories_store_name);
-
-//                     out["Metafield: title_tag [string]"] = toStr(parent.meta_title);
-//                     out["Metafield: description_tag [string]"] = toStr(parent.meta_description);
-
-//                     const img = pickFirstImage(parent, logs);
-//                     if (img) {
-//                         out["Image Src"] = img;
-//                         out["Image Position"] = 1;
-//                     }
-
-//                     attachProductMetafields(out, parent);
-//                 }
-
-//                 // Variant pricing + inventory from child
-//                 const { price, compareAt } = getPriceAndCompare(child);
-//                 const qty = safeNumber(child.qty);
-
-//                 out["Variant SKU"] = childSku;
-//                 out["Variant Price"] = price === "" ? "" : String(price);
-//                 out["Variant Compare At Price"] = compareAt === "" ? "" : String(compareAt);
-//                 out["Variant Inventory Qty"] = String(qty || 0);
-
-//                 const vImg = pickFirstImage(child, logs);
-//                 if (vImg) out["Variant Image"] = vImg;
-
-//                 const w = safeNumber(child.weight);
-//                 if (w > 0) {
-//                     out["Variant Weight"] = String(w);
-//                     out["Variant Weight Unit"] = "lb";
-//                 }
-
-//                 const attrs = variationMap.get(childSku) || null;
-//                 if (!attrs && optionDefs.length) {
-//                     logs.push(`WARN: Could not find option values for child SKU=${childSku} under parent SKU=${parentSku}.`);
-//                 }
-
-//                 // Options
-//                 if (optionDefs.length) {
-//                     for (let oi = 0; oi < 3; oi++) {
-//                         const def = optionDefs[oi];
-//                         if (!def) break;
-//                         out[`Option${oi + 1} Name`] = def.name;
-//                         out[`Option${oi + 1} Value`] = !isEmpty(attrs?.[def.code]) ? toStr(attrs[def.code]) : "";
-//                     }
-//                 } else {
-//                     out["Option1 Name"] = "Title";
-//                     out["Option1 Value"] = "Default Title";
-//                 }
-
-//                 out["Variant Inventory Tracker"] = "shopify";
-//                 out["Variant Inventory Policy"] = "deny";
-//                 out["Variant Requires Shipping"] = "TRUE";
-//                 out["Variant Taxable"] = "TRUE";
-
-//                 attachVariantMetafields(out, child);
-
-//                 writeRow(out);
-//                 rowNum++;
-//             }
-//         }
-
-//         // reset
-//         currentParent = null;
-//         currentParentSku = "";
-//         currentParentChildren = [];
-//     }
-
-//     console.log("Streaming workbook reading started...");
-
-//     for await (const worksheetReader of reader) {
-//         console.log("Worksheet found:", worksheetReader.name);
-
-//         let headerRowSeen = false;
-
-//         for await (const row of worksheetReader) {
-//             // ExcelJS gives Row with number + values
-//             totalReadRows++;
-
-//             // progress log every 10k input rows
-//             if (totalReadRows % 10000 === 0) {
-//                 console.log("Input rows read:", totalReadRows);
-//                 console.log("Memory Usage (MB):", (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2));
-//             }
-
-//             // Row 1 = header
-//             if (!headerRowSeen) {
-//                 headerRowSeen = true;
-
-//                 // Build normalized input headers
-//                 // row.values is 1-indexed, so slice from 1
-//                 const rawHeaders = row.values.slice(1).map((h) => toStr(h).trim());
-//                 inputHeaders = rawHeaders.map((h) => slugify(h).replace(/-/g, "_")); // normalize like "Parent SKU" -> "parent_sku"
-
-//                 console.log("Header parsed. Total columns:", inputHeaders.length);
-
-//                 // Decide metafield columns based on headers (fast, no scanning)
-//                 const eligible = rawHeaders
-//                     .map((h) => toStr(h).trim())
-//                     .filter((h) => h && !DIRECT_USED_COLUMNS.has(slugify(h).replace(/-/g, "_")));
-
-//                 productMfFinal = eligible.slice(0, MAX_PRODUCT_METAFIELDS);
-//                 variantMfFinal = eligible.slice(0, MAX_VARIANT_METAFIELDS);
-
-//                 productMfColumns = productMfFinal.map((col) => `Metafield: ${MF_NAMESPACE}.${toMetafieldKey(col)} [string]`);
-//                 variantMfColumns = variantMfFinal.map((col) => `Variant Metafield: ${MF_NAMESPACE}.${toMetafieldKey(col)} [string]`);
-
-//                 outputHeader = [...SHOPIFY_COLUMNS, ...productMfColumns, ...variantMfColumns];
-
-//                 // Set output columns once
-//                 outWs.columns = outputHeader.map((h) => ({ header: h, key: h }));
-//                 outWs.addRow(outputHeader).commit(); // write header row
-
-//                 console.log("Output header written. Total output columns:", outputHeader.length);
-
-//                 continue;
-//             }
-
-//             // Convert row to object with original header names (we need known keys like sku, product_type etc.)
-//             // We'll map using normalized headers; this requires your input header names to be consistent-ish.
-//             const rowObj = rowToObject(inputHeaders, row.values);
-
-//             // IMPORTANT: because we normalized headers, we expect keys like:
-//             // sku, product_type, parent_sku, name, description, url_key...
-//             // If your actual sheet uses different header names, we need to map them here.
-//             const pt = toStr(rowObj.product_type).trim().toLowerCase();
-//             const sku = toStr(rowObj.sku).trim();
-//             const parentSku = toStr(rowObj.parent_sku).trim();
-
-//             // Skip empty rows
-//             if (!sku && !pt) continue;
-
-//             // ===== SIMPLE (no parent_sku) =====
-//             if (pt === "simple" && isEmpty(parentSku)) {
-//                 // If we were in the middle of a configurable group, flush it BEFORE writing a standalone simple
-//                 // because configurable groups are contiguous.
-//                 // (If your file mixes, this keeps order stable.)
-//                 flushCurrentParentGroup();
-
-//                 if (totalReadRows % 5000 === 0) {
-//                     console.log("Processing SIMPLE products... current input row:", totalReadRows);
-//                 }
-
-//                 const handle = toStr(rowObj.url_key).trim() ? slugify(rowObj.url_key) : slugify(rowObj.name || rowObj.sku);
-//                 const { price, compareAt } = getPriceAndCompare(rowObj);
-//                 const qty = safeNumber(rowObj.qty);
-
-//                 const out = makeEmptyRowObj(outputHeader);
-//                 out["Row #"] = rowNum;
-//                 out["Top Row"] = 1;
-
-//                 out["Handle"] = handle;
-//                 out["Title"] = toStr(rowObj.name);
-//                 out["Body HTML"] = toStr(rowObj.description || rowObj.short_description);
-//                 out["Status"] = getStatus(rowObj);
-//                 out["Published"] = getPublished(rowObj);
-//                 out["Created At"] = toStr(rowObj.created_at);
-//                 out["Updated At"] = toStr(rowObj.updated_at);
-//                 out["Tags"] = asTags(rowObj.categories, rowObj.categories_store_name);
-
-//                 out["Metafield: title_tag [string]"] = toStr(rowObj.meta_title);
-//                 out["Metafield: description_tag [string]"] = toStr(rowObj.meta_description);
-
-//                 const img = pickFirstImage(rowObj, logs);
-//                 if (img) {
-//                     out["Image Src"] = img;
-//                     out["Image Position"] = 1;
-//                 }
-
-//                 out["Option1 Name"] = "Title";
-//                 out["Option1 Value"] = "Default Title";
-
-//                 out["Variant SKU"] = sku;
-//                 out["Variant Price"] = price === "" ? "" : String(price);
-//                 out["Variant Compare At Price"] = compareAt === "" ? "" : String(compareAt);
-//                 out["Variant Inventory Qty"] = String(qty || 0);
-
-//                 const w = safeNumber(rowObj.weight);
-//                 if (w > 0) {
-//                     out["Variant Weight"] = String(w);
-//                     out["Variant Weight Unit"] = "lb";
-//                 }
-
-//                 out["Variant Inventory Tracker"] = "shopify";
-//                 out["Variant Inventory Policy"] = "deny";
-//                 out["Variant Requires Shipping"] = "TRUE";
-//                 out["Variant Taxable"] = "TRUE";
-
-//                 attachProductMetafields(out, rowObj);
-//                 attachVariantMetafields(out, rowObj);
-
-//                 writeRow(out);
-//                 rowNum++;
-
-//                 continue;
-//             }
-
-//             // ===== CONFIGURABLE PARENT =====
-//             if (pt === "configurable") {
-//                 // flush previous parent group
-//                 flushCurrentParentGroup();
-
-//                 if (totalReadRows % 2000 === 0) {
-//                     console.log("Processing CONFIGURABLE parents... current input row:", totalReadRows);
-//                 }
-
-//                 currentParent = rowObj;
-//                 currentParentSku = sku;
-//                 currentParentChildren = [];
-//                 continue;
-//             }
-
-//             // ===== CHILD VARIANT =====
-//             if (pt === "simple" && !isEmpty(parentSku)) {
-//                 // If child belongs to current parent, collect it
-//                 if (currentParent && currentParentSku === parentSku) {
-//                     currentParentChildren.push(rowObj);
-
-//                     if (currentParentChildren.length % 200 === 0) {
-//                         console.log(`Collected children for parent ${currentParentSku}:`, currentParentChildren.length);
-//                     }
-//                 } else {
-//                     orphanChildrenCount++;
-//                     logs.push(`WARN: Child SKU=${sku} has parent_sku=${parentSku} but parent not in current stream context (or parent missing).`);
-//                     if (orphanChildrenCount % 500 === 0) {
-//                         console.log("Orphan children encountered:", orphanChildrenCount);
-//                     }
-//                 }
-//                 continue;
-//             }
-
-//             // Anything else
-//             // If your sheet has other product_type values, we just log and skip
-//             logs.push(`WARN: Unhandled product_type="${pt}" for SKU=${sku}`);
-//         }
-
-//         // only first worksheet
-//         break;
-//     }
-
-//     // flush last group
-//     flushCurrentParentGroup();
-
-//     console.log("Finishing output workbook...");
-//     await outWb.commit();
-
-//     fs.writeFileSync(logPath, logs.join("\n"), "utf8");
-
-//     console.log("========== STREAM CONVERSION COMPLETE ==========");
-//     console.log("Total input rows read:", totalReadRows);
-//     console.log("Total output rows written:", totalOutputRows);
-//     console.log("Output file:", outPath);
-//     console.log("Logs file:", logPath);
-
-//     return { outPath, logPath, totalReadRows, totalOutputRows, logsCount: logs.length };
-// }
-
-// /** ---------- EXPRESS HANDLER ---------- **/
-// export async function convertToShopifySheet(req, res) {
-//     try {
-//         if (!req?.file?.buffer) {
-//             return res.status(400).json({
-//                 status: false,
-//                 message: "Missing file buffer. Please upload XLSX as multipart/form-data (field name: file).",
-//             });
-//         }
-//         console.log("First 20 bytes:", req.file.buffer.slice(0, 20).toString("hex"));
-//         console.log("First 50 chars:", req.file.buffer.slice(0, 50).toString("utf8"));
-
-
-//         console.log("========== FILE RECEIVED ==========");
-//         console.log("Buffer size (MB):", (req.file.buffer.length / 1024 / 1024).toFixed(2));
-//         console.log("Start Time:", new Date().toISOString());
-
-//         const result = await convertBufferToShopifyXlsxStreaming(req.file.buffer);
-
-//         console.log("End Time:", new Date().toISOString());
-//         console.log("Final Memory Usage (MB):", (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2));
-
-//         return res.json({
-//             status: true,
-//             message: "Converted to Shopify formatted sheet (streaming).",
-//             result: {
-//                 shopifySheetPath: result.outPath,
-//                 logsPath: result.logPath,
-//                 stats: {
-//                     inputRowsRead: result.totalReadRows,
-//                     outputRowsWritten: result.totalOutputRows,
-//                     logsCount: result.logsCount,
-//                 },
-//             },
-//         });
-//     } catch (err) {
-//         console.log("ERROR:", err);
-//         return res.status(500).json({
-//             status: false,
-//             message: "Internal server error.",
-//             result: { error: err?.message || String(err) },
-//         });
-//     }
-// }
 
 //chunk file read but not orphan in json creating then read-------------------------------------------------------------------------
 import fs from "fs";
@@ -1541,9 +11,15 @@ import { Readable } from "stream";
 const OUTPUT_DIR = path.join(process.cwd(), "tmp", "shopify_exports");
 const MF_NAMESPACE = "magento";
 
+// NOTE: We were NOT generating Variant Metafields earlier.
+// Now we will generate ONLY ONE variant metafield: modal_number.
 const MAX_PRODUCT_METAFIELDS = 180;
 const MAX_VARIANT_METAFIELDS = 180;
 
+/**
+ * Shopify columns (unchanged)
+ * We will append product metafield columns + (NOW) variant metafield columns.
+ */
 const SHOPIFY_COLUMNS = [
   "ID","Handle","Command","Title","Body HTML","Vendor","Type","Tags","Tags Command",
   "Created At","Updated At","Status","Published","Published At","Published Scope",
@@ -1566,6 +42,239 @@ const SHOPIFY_COLUMNS = [
   "Inventory Incoming: Shop location",
   "Included / test cat","Price / test cat","Compare At Price / test cat",
   "Metafield: title_tag [string]","Metafield: description_tag [string]",
+];
+
+/**
+ * CLIENT REQUIRED METAFIELDS (product only)
+ */
+const PRODUCT_METAFIELD_SPECS = [
+  { key: "price", type: "single_line_text_field", source: "price" },
+  { key: "price_change_date", type: "date", source: "price_change_date" },
+  { key: "price_change_amt", type: "single_line_text_field", source: "price_change_amt" },
+  { key: "made_in_usa", type: "boolean", source: "made_in_usa" },
+  { key: "energy_star", type: "boolean", source: "energy_star" },
+  { key: "product_certs", type: "list.single_line_text_field", source: "product_certs" },
+
+  { key: "shipping_speed", type: "single_line_text_field", source: "shipping_speed" },
+  { key: "condtition", type: "single_line_text_field", source: "condtition" }, // client typo kept
+  { key: "condition", type: "single_line_text_field", source: "condition" },   // sheet column exists
+  { key: "uom", type: "single_line_text_field", source: "uom" },
+  { key: "freight_class", type: "single_line_text_field", source: "freight_class" },
+  { key: "must_ship_freight", type: "single_line_text_field", source: "must_ship_freight" },
+  { key: "discon_replacement", type: "single_line_text_field", source: "discon_replacement" },
+  { key: "image_note", type: "single_line_text_field", source: "image_note" },
+
+  { key: "product_cert", type: "single_line_text_field", source: "product_cert" }, // if exists
+  { key: "product_certs_text", type: "single_line_text_field", source: "product_certs" }, // optional extra
+  { key: "filter_exterior_finish", type: "single_line_text_field", source: "filter_exterior_finish" },
+  { key: "filter_interior_finish", type: "single_line_text_field", source: "filter_interior_finish" },
+  { key: "filter_width_side_side", type: "single_line_text_field", source: "filter_width_side_side" },
+  { key: "filter_doortype", type: "single_line_text_field", source: "filter_doortype" },
+  { key: "filter_doorqty", type: "single_line_text_field", source: "filter_doorqty" },
+  { key: "filter_depth_front_back", type: "single_line_text_field", source: "filter_depth_front_back" },
+  { key: "filter_door_swing", type: "single_line_text_field", source: "filter_door_swing" },
+  { key: "filter_refrigeration_location", type: "single_line_text_field", source: "filter_refrigeration_location" },
+  { key: "filter_top_finish", type: "single_line_text_field", source: "filter_top_finish" },
+  { key: "filter_dispenser_type", type: "single_line_text_field", source: "filter_dispenser_type" },
+  { key: "filter_storage_capacity", type: "single_line_text_field", source: "filter_storage_capacity" },
+  { key: "filter_daily_production", type: "single_line_text_field", source: "filter_daily_production" },
+  { key: "filter_cooling", type: "single_line_text_field", source: "filter_cooling" },
+  { key: "filter_compressor_horsepower", type: "single_line_text_field", source: "filter_compressor_horsepower" },
+  { key: "filter_drawer_quantity", type: "single_line_text_field", source: "filter_drawer_quantity" },
+  { key: "filter_height_top_bottom", type: "single_line_text_field", source: "filter_height_top_bottom" },
+  { key: "filter_shelf_quantity", type: "single_line_text_field", source: "filter_shelf_quantity" },
+  { key: "filter_service_type", type: "single_line_text_field", source: "filter_service_type" },
+  { key: "filter_display_front_style", type: "single_line_text_field", source: "filter_display_front_style" },
+  { key: "filter_installation_type", type: "single_line_text_field", source: "filter_installation_type" },
+  { key: "filter_working_tub_capacity", type: "single_line_text_field", source: "filter_working_tub_capacity" },
+  { key: "filter_keg_colpertower", type: "single_line_text_field", source: "filter_keg_colpertower" },
+  { key: "filter_keg_barrel_style", type: "single_line_text_field", source: "filter_keg_barrel_style" },
+  { key: "filter_keg_faucets", type: "single_line_text_field", source: "filter_keg_faucets" },
+  { key: "filter_access_type", type: "single_line_text_field", source: "filter_access_type" },
+  { key: "filter_sections", type: "single_line_text_field", source: "filter_sections" },
+  { key: "filter_work_surface", type: "single_line_text_field", source: "filter_work_surface" },
+  { key: "filter_nom_long_side", type: "single_line_text_field", source: "filter_nom_long_side" },
+  { key: "filter_nom_height", type: "single_line_text_field", source: "filter_nom_height" },
+  { key: "filter_nom_short_side", type: "single_line_text_field", source: "filter_nom_short_side" },
+  { key: "filter_floor", type: "single_line_text_field", source: "filter_floor" },
+  { key: "filter_heat_source", type: "single_line_text_field", source: "filter_heat_source" },
+  { key: "filter_ignition_type", type: "single_line_text_field", source: "filter_ignition_type" },
+  { key: "filter_rack_positions", type: "single_line_text_field", source: "filter_rack_positions" },
+  { key: "filter_controls", type: "single_line_text_field", source: "filter_controls" },
+  { key: "filter_fs_hotelpan_cap", type: "single_line_text_field", source: "filter_fs_hotelpan_cap" },
+  { key: "filter_fs_sheetpan_cap", type: "single_line_text_field", source: "filter_fs_sheetpan_cap" },
+  { key: "filter_steam_type", type: "single_line_text_field", source: "filter_steam_type" },
+  { key: "filter_griddle_area", type: "single_line_text_field", source: "filter_griddle_area" },
+  { key: "filter_griddle_plate_thickness", type: "single_line_text_field", source: "filter_griddle_plate_thickness" },
+  { key: "filter_burner_quantity", type: "single_line_text_field", source: "filter_burner_quantity" },
+  { key: "filter_oven_capacity", type: "single_line_text_field", source: "filter_oven_capacity" },
+  { key: "filter_proofer_capacity", type: "single_line_text_field", source: "filter_proofer_capacity" },
+  { key: "filter_oven_size", type: "single_line_text_field", source: "filter_oven_size" },
+  { key: "filter_production_per_hour", type: "single_line_text_field", source: "filter_production_per_hour" },
+  { key: "filter_bread_or_bagel", type: "single_line_text_field", source: "filter_bread_or_bagel" },
+  { key: "filter_toaster_opening", type: "single_line_text_field", source: "filter_toaster_opening" },
+  { key: "filter_fat_capacity", type: "single_line_text_field", source: "filter_fat_capacity" },
+  { key: "filter_oil_filter", type: "single_line_text_field", source: "filter_oil_filter" },
+  { key: "filter_hotdog_capacity", type: "single_line_text_field", source: "filter_hotdog_capacity" },
+  { key: "filter_burner_type", type: "single_line_text_field", source: "filter_burner_type" },
+  { key: "filter_watts", type: "single_line_text_field", source: "filter_watts" },
+  { key: "filter_usage_level", type: "single_line_text_field", source: "filter_usage_level" },
+  { key: "filter_tank_capacity", type: "single_line_text_field", source: "filter_tank_capacity" },
+  { key: "filter_tank_quantity", type: "single_line_text_field", source: "filter_tank_quantity" },
+  { key: "filter_water_fill", type: "single_line_text_field", source: "filter_water_fill" },
+  { key: "filter_pop_kettle_size", type: "single_line_text_field", source: "filter_pop_kettle_size" },
+  { key: "filter_range_surface", type: "single_line_text_field", source: "filter_range_surface" },
+  { key: "filter_range_back", type: "single_line_text_field", source: "filter_range_back" },
+  { key: "filter_cooked_rice_capacity", type: "single_line_text_field", source: "filter_cooked_rice_capacity" },
+  { key: "filter_uncooked_rice_capacity", type: "single_line_text_field", source: "filter_uncooked_rice_capacity" },
+  { key: "filter_plate_quantity", type: "single_line_text_field", source: "filter_plate_quantity" },
+  { key: "filter_pan_capacity", type: "single_line_text_field", source: "filter_pan_capacity" },
+  { key: "filter_drain_connection", type: "single_line_text_field", source: "filter_drain_connection" },
+  { key: "filter_internal_capacity", type: "single_line_text_field", source: "filter_internal_capacity" },
+  { key: "filter_kettle_jacket", type: "single_line_text_field", source: "filter_kettle_jacket" },
+  { key: "filter_burner_ring_quantity", type: "single_line_text_field", source: "filter_burner_ring_quantity" },
+  { key: "filter_base_type", type: "single_line_text_field", source: "filter_base_type" },
+  { key: "filter_tilt_mechanism", type: "single_line_text_field", source: "filter_tilt_mechanism" },
+  { key: "filter_pan_shape", type: "single_line_text_field", source: "filter_pan_shape" },
+  { key: "filter_fryer_quantity", type: "single_line_text_field", source: "filter_fryer_quantity" },
+  { key: "filter_waffle_shape", type: "single_line_text_field", source: "filter_waffle_shape" },
+  { key: "filter_size", type: "single_line_text_field", source: "filter_size" },
+  { key: "filter_working_height", type: "single_line_text_field", source: "filter_working_height" },
+  { key: "filter_arm_style", type: "single_line_text_field", source: "filter_arm_style" },
+  { key: "filter_lamp_finish", type: "single_line_text_field", source: "filter_lamp_finish" },
+  { key: "filter_bulb_quantity", type: "single_line_text_field", source: "filter_bulb_quantity" },
+  { key: "filter_support_location", type: "single_line_text_field", source: "filter_support_location" },
+  { key: "filter_slide_capacity", type: "single_line_text_field", source: "filter_slide_capacity" },
+  { key: "filter_insulation", type: "single_line_text_field", source: "filter_insulation" },
+  { key: "filter_centers_size", type: "single_line_text_field", source: "filter_centers_size" },
+  { key: "filter_color", type: "single_line_text_field", source: "filter_color" },
+  { key: "filter_operation", type: "single_line_text_field", source: "filter_operation" },
+  { key: "filter_hot_or_cold", type: "single_line_text_field", source: "filter_hot_or_cold" },
+  { key: "filter_thermometer_type", type: "single_line_text_field", source: "filter_thermometer_type" },
+  { key: "filter_internal_configuration", type: "single_line_text_field", source: "filter_internal_configuration" },
+  { key: "filter_shelf_type", type: "single_line_text_field", source: "filter_shelf_type" },
+  { key: "filter_heated_unheated", type: "single_line_text_field", source: "filter_heated_unheated" },
+  { key: "filter_plate_diameter", type: "single_line_text_field", source: "filter_plate_diameter" },
+  { key: "filter_hs_sheetpan_capacity", type: "single_line_text_field", source: "filter_hs_sheetpan_capacity" },
+  { key: "filter_pump_style", type: "single_line_text_field", source: "filter_pump_style" },
+  { key: "filter_dispenser_quantity", type: "single_line_text_field", source: "filter_dispenser_quantity" },
+  { key: "filter_warmer_type", type: "single_line_text_field", source: "filter_warmer_type" },
+  { key: "filter_cold_pan_capacity", type: "single_line_text_field", source: "filter_cold_pan_capacity" },
+  { key: "filter_hot_pan_capacity", type: "single_line_text_field", source: "filter_hot_pan_capacity" },
+  { key: "filter_well_type", type: "single_line_text_field", source: "filter_well_type" },
+  { key: "filter_drainboard", type: "single_line_text_field", source: "filter_drainboard" },
+  { key: "filter_splash_height", type: "single_line_text_field", source: "filter_splash_height" },
+  { key: "filter_sink_compartment_qty", type: "single_line_text_field", source: "filter_sink_compartment_qty" },
+  { key: "filter_dishmachine_temp", type: "single_line_text_field", source: "filter_dishmachine_temp" },
+  { key: "filter_dish_rack_capacity", type: "single_line_text_field", source: "filter_dish_rack_capacity" },
+  { key: "filter_dishmachine_arm_type", type: "single_line_text_field", source: "filter_dishmachine_arm_type" },
+  { key: "filter_dishrack_compartments", type: "single_line_text_field", source: "filter_dishrack_compartments" },
+  { key: "filter_inside_rack_height", type: "single_line_text_field", source: "filter_inside_rack_height" },
+  { key: "filter_dish_machine_location", type: "single_line_text_field", source: "filter_dish_machine_location" },
+  { key: "filter_operation_direction", type: "single_line_text_field", source: "filter_operation_direction" },
+  { key: "filter_design", type: "single_line_text_field", source: "filter_design" },
+  { key: "filter_ice_type", type: "single_line_text_field", source: "filter_ice_type" },
+  { key: "filter_lead_compliance", type: "single_line_text_field", source: "filter_lead_compliance" },
+  { key: "filter_faucet_centers", type: "single_line_text_field", source: "filter_faucet_centers" },
+  { key: "filter_faucet_spout_length", type: "single_line_text_field", source: "filter_faucet_spout_length" },
+  { key: "filter_garb_disposal_fit", type: "single_line_text_field", source: "filter_garb_disposal_fit" },
+  { key: "filter_grease_flow_rate", type: "single_line_text_field", source: "filter_grease_flow_rate" },
+  { key: "filter_motor_horsepower", type: "single_line_text_field", source: "filter_motor_horsepower" },
+  { key: "filter_max_opening_height", type: "single_line_text_field", source: "filter_max_opening_height" },
+  { key: "filter_number_of_motors", type: "single_line_text_field", source: "filter_number_of_motors" },
+  { key: "filter_container_finish", type: "single_line_text_field", source: "filter_container_finish" },
+  { key: "filter_motor_type", type: "single_line_text_field", source: "filter_motor_type" },
+  { key: "filter_beverage_type", type: "single_line_text_field", source: "filter_beverage_type" },
+  { key: "filter_glass_height", type: "single_line_text_field", source: "filter_glass_height" },
+  { key: "filter_glass_diameter", type: "single_line_text_field", source: "filter_glass_diameter" },
+  { key: "filter_number_of_hoppers", type: "single_line_text_field", source: "filter_number_of_hoppers" },
+  { key: "filter_grinder_type", type: "single_line_text_field", source: "filter_grinder_type" },
+  { key: "filter_sink_dimensions", type: "single_line_text_field", source: "filter_sink_dimensions" },
+  { key: "filter_fill_type", type: "single_line_text_field", source: "filter_fill_type" },
+  { key: "filter_spindle_qty", type: "single_line_text_field", source: "filter_spindle_qty" },
+  { key: "filter_roller", type: "single_line_text_field", source: "filter_roller" },
+  { key: "filter_blending_capacity", type: "single_line_text_field", source: "filter_blending_capacity" },
+  { key: "filter_shaft_size", type: "single_line_text_field", source: "filter_shaft_size" },
+  { key: "filter_attachments", type: "single_line_text_field", source: "filter_attachments" },
+  { key: "filter_surface_size", type: "single_line_text_field", source: "filter_surface_size" },
+  { key: "filter_legal_for_trade", type: "single_line_text_field", source: "filter_legal_for_trade" },
+  { key: "filter_weight_capacity", type: "single_line_text_field", source: "filter_weight_capacity" },
+  { key: "filter_faucet_spout_type", type: "single_line_text_field", source: "filter_faucet_spout_type" },
+  { key: "filter_container_capacity", type: "single_line_text_field", source: "filter_container_capacity" },
+  { key: "filter_warmer_quantity", type: "single_line_text_field", source: "filter_warmer_quantity" },
+  { key: "filter_btu", type: "single_line_text_field", source: "filter_btu" },
+  { key: "filter_output", type: "single_line_text_field", source: "filter_output" },
+  { key: "filter_drive_type", type: "single_line_text_field", source: "filter_drive_type" },
+  { key: "filter_knife_size", type: "single_line_text_field", source: "filter_knife_size" },
+  { key: "filter_feed_type", type: "single_line_text_field", source: "filter_feed_type" },
+  { key: "filter_cutter_type", type: "single_line_text_field", source: "filter_cutter_type" },
+  { key: "filter_seat_style", type: "single_line_text_field", source: "filter_seat_style" },
+  { key: "filter_back_style", type: "single_line_text_field", source: "filter_back_style" },
+  { key: "filter_glass_type", type: "single_line_text_field", source: "filter_glass_type" },
+  { key: "filter_ship_assembly", type: "single_line_text_field", source: "filter_ship_assembly" },
+  { key: "filter_length", type: "single_line_text_field", source: "filter_length" },
+  { key: "filter_shape", type: "single_line_text_field", source: "filter_shape" },
+  { key: "filter_dough_capacity", type: "single_line_text_field", source: "filter_dough_capacity" },
+  { key: "filter_bowl_capacity", type: "single_line_text_field", source: "filter_bowl_capacity" },
+  { key: "filter_knife_type", type: "single_line_text_field", source: "filter_knife_type" },
+  { key: "filter_handle_finish", type: "single_line_text_field", source: "filter_handle_finish" },
+  { key: "filter_blade_length", type: "single_line_text_field", source: "filter_blade_length" },
+  { key: "filter_heater_location", type: "single_line_text_field", source: "filter_heater_location" },
+  { key: "filter_weight_display", type: "single_line_text_field", source: "filter_weight_display" },
+  { key: "filter_urn_qty", type: "single_line_text_field", source: "filter_urn_qty" },
+  { key: "filter_brewer_qty", type: "single_line_text_field", source: "filter_brewer_qty" },
+  { key: "filter_brewing_capacity", type: "single_line_text_field", source: "filter_brewing_capacity" },
+  { key: "filter_bowl_qty", type: "single_line_text_field", source: "filter_bowl_qty" },
+  { key: "filter_heater_bar_qty", type: "single_line_text_field", source: "filter_heater_bar_qty" },
+  { key: "filter_base_finish", type: "single_line_text_field", source: "filter_base_finish" },
+  { key: "filter_broiler_area", type: "single_line_text_field", source: "filter_broiler_area" },
+  { key: "filter_power_level", type: "single_line_text_field", source: "filter_power_level" },
+  { key: "filter_deck_qty", type: "single_line_text_field", source: "filter_deck_qty" },
+  { key: "filter_utensil_capacity", type: "single_line_text_field", source: "filter_utensil_capacity" },
+  { key: "filter_stackable", type: "single_line_text_field", source: "filter_stackable" },
+  { key: "filter_material", type: "single_line_text_field", source: "filter_material" },
+  { key: "filter_edge", type: "single_line_text_field", source: "filter_edge" },
+  { key: "filter_collection", type: "single_line_text_field", source: "filter_collection" },
+  { key: "filter_capacity", type: "single_line_text_field", source: "filter_capacity" },
+  { key: "filter_style", type: "single_line_text_field", source: "filter_style" },
+  { key: "filter_gauge", type: "single_line_text_field", source: "filter_gauge" },
+  { key: "filter_features", type: "single_line_text_field", source: "filter_features" },
+  { key: "filter_power_type", type: "single_line_text_field", source: "filter_power_type" },
+  { key: "filter_warmer_setup", type: "single_line_text_field", source: "filter_warmer_setup" },
+  { key: "filter_compartment_quantity", type: "single_line_text_field", source: "filter_compartment_quantity" },
+  { key: "filter_bun_capacity", type: "single_line_text_field", source: "filter_bun_capacity" },
+  { key: "filter_pan_size", type: "single_line_text_field", source: "filter_pan_size" },
+  { key: "filter_wet_dry_operation", type: "single_line_text_field", source: "filter_wet_dry_operation" },
+  { key: "filter_roller_size", type: "single_line_text_field", source: "filter_roller_size" },
+  { key: "filter_keg_capacity", type: "single_line_text_field", source: "filter_keg_capacity" },
+  { key: "filter_sink_length", type: "single_line_text_field", source: "filter_sink_length" },
+  { key: "filter_sink_depth", type: "single_line_text_field", source: "filter_sink_depth" },
+  { key: "filter_sink_width", type: "single_line_text_field", source: "filter_sink_width" },
+  { key: "filter_booster_included", type: "single_line_text_field", source: "filter_booster_included" },
+  { key: "filter_sink_included", type: "single_line_text_field", source: "filter_sink_included" },
+  { key: "filter_faucet_included", type: "single_line_text_field", source: "filter_faucet_included" },
+  { key: "filter_with_lights", type: "single_line_text_field", source: "filter_with_lights" },
+  { key: "filter_pan_type", type: "single_line_text_field", source: "filter_pan_type" },
+  { key: "filter_pan_rack_capacity", type: "single_line_text_field", source: "filter_pan_rack_capacity" },
+  { key: "directional_operation", type: "single_line_text_field", source: "directional_operation" },
+
+  // ✅ (1) NEW product metafield: short_description (sheet column: short_description)
+  { key: "short_description", type: "single_line_text_field", source: "short_description" },
+
+  // ✅ (2) NEW product metafield: warranty_product (sheet column: warranty_product)
+  { key: "warranty_product", type: "single_line_text_field", source: "warranty_product" },
+    { key: "shipperhq_shipping_group", type: "single_line_text_field", source: "shipperhq_shipping_group" },
+
+];
+
+/**
+ * ✅ (3) NEW: Variant metafield specs (ONLY modal_number)
+ * - If your sheet column is exactly "modal_number" this will work.
+ * - Added a safe fallback to "model_number" in case your source uses that spelling.
+ */
+const VARIANT_METAFIELD_SPECS = [
+  { key: "modal_number", type: "single_line_text_field", source: "modal_number", fallbackSource: "model_number" },
+   { key: "price", type: "single_line_text_field", source: "price" },
 ];
 
 /** ---------- HELPERS ---------- **/
@@ -1655,15 +364,6 @@ function parseConfigurableLabels(str) {
   return out;
 }
 
-function getPriceAndCompare(row) {
-  const price = safeNumber(row.price);
-  const special = safeNumber(row.special_price);
-  if (special > 0 && price > 0 && special < price) return { price: special, compareAt: price };
-  if (price > 0) return { price, compareAt: "" };
-  if (special > 0) return { price: special, compareAt: "" };
-  return { price: "", compareAt: "" };
-}
-
 function getStatus(row) {
   const po = String(row.product_online ?? "").trim();
   if (po === "1" || po.toLowerCase() === "yes" || po.toLowerCase() === "true") return "active";
@@ -1717,6 +417,79 @@ async function readJsonLines(filePath) {
   return out;
 }
 
+function normalizeBoolean(v) {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (!s) return "";
+  if (s === "1" || s === "true" || s === "yes" || s === "y") return "TRUE";
+  if (s === "0" || s === "false" || s === "no" || s === "n") return "FALSE";
+  return "";
+}
+
+function normalizeListSingleLineText(v) {
+  const s = String(v ?? "").trim();
+  if (!s) return "";
+  const arr = s
+    .split(/[|,]/g)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (!arr.length) return "";
+  return JSON.stringify([...new Set(arr)]);
+}
+
+/**
+ * FIX #1 (EBUSY unlink on Windows):
+ * - unlinkSync can fail if a stream (readJsonLines) still holds the file handle briefly.
+ * - We add a small retry with backoff, and fall back to rename+delete later.
+ */
+async function safeUnlink(filePath, logs, tries = 6) {
+  if (!filePath) return;
+  if (!fs.existsSync(filePath)) return;
+
+  for (let i = 0; i < tries; i++) {
+    try {
+      fs.unlinkSync(filePath);
+      return;
+    } catch (err) {
+      const code = err?.code;
+      if (code === "EBUSY" || code === "EPERM") {
+        // wait a bit and retry
+        await new Promise((r) => setTimeout(r, 50 * (i + 1)));
+        continue;
+      }
+      // other errors: log and stop retrying
+      logs?.push?.(`WARN: safeUnlink failed for ${filePath}: ${err?.message || String(err)}`);
+      return;
+    }
+  }
+
+  // last resort: rename so the job can finish; delete in final cleanup
+  try {
+    const renamed = `${filePath}.delete_${Date.now()}`;
+    fs.renameSync(filePath, renamed);
+    logs?.push?.(`WARN: Could not unlink due to lock. Renamed for later cleanup: ${path.basename(renamed)}`);
+  } catch (e) {
+    logs?.push?.(`WARN: Could not unlink or rename locked file ${filePath}: ${e?.message || String(e)}`);
+  }
+}
+
+/**
+ * FIX #2 (too many spool files):
+ * - We already delete each child file after using it.
+ * - Add final cleanup to remove:
+ *   - remaining orphan child files
+ *   - parent json files
+ *   - spool folders (parents/children/spoolDir)
+ */
+function safeRmdirRecursive(dirPath, logs) {
+  if (!dirPath) return;
+  if (!fs.existsSync(dirPath)) return;
+  try {
+    fs.rmSync(dirPath, { recursive: true, force: true });
+  } catch (e) {
+    logs?.push?.(`WARN: Could not remove dir ${dirPath}: ${e?.message || String(e)}`);
+  }
+}
+
 /** ---------- STREAMING CONVERTER (DISK SPOOLING) ---------- **/
 async function convertBufferToShopifyXlsxStreaming(buffer) {
   console.log("========== START BUILDING SHOPIFY ROWS (STREAM) ==========");
@@ -1757,18 +530,17 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
   let inputHeaders = null;
   let outputHeader = null;
 
-  let productMfFinal = [];
-  let variantMfFinal = [];
-  let productMfColumns = [];
-  let variantMfColumns = [];
+  // Build product metafield columns strictly from client list (no scanning)
+  const productMfColumns = PRODUCT_METAFIELD_SPECS.map((m) => {
+    const key = toMetafieldKey(m.key);
+    return `Metafield: ${MF_NAMESPACE}.${key} [${m.type}]`;
+  });
 
-  const DIRECT_USED_COLUMNS = new Set([
-    "sku","product_type","parent_sku","name","description","short_description","url_key",
-    "created_at","updated_at","price","special_price","qty","weight","tax_class_name",
-    "visibility","product_online","categories","categories_store_name","category_ids",
-    "meta_title","meta_description","base_image","small_image","thumbnail_image","swatch_image",
-    "additional_images","configurable_variations","configurable_variation_labels",
-  ]);
+  // ✅ NEW: Build variant metafield columns (only modal_number)
+  const variantMfColumns = VARIANT_METAFIELD_SPECS.map((m) => {
+    const key = toMetafieldKey(m.key);
+    return `Variant Metafield: ${MF_NAMESPACE}.${key} [${m.type}]`;
+  });
 
   let rowNum = 1;
   let totalReadRows = 0;
@@ -1778,7 +550,6 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
   let childCount = 0;
   let simpleCount = 0;
 
-  // Keep parent order for deterministic output (important)
   const parentOrder = [];
 
   function writeRow(obj) {
@@ -1792,18 +563,44 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
   }
 
   function attachProductMetafields(outRow, sourceRow) {
-    for (let i = 0; i < productMfFinal.length; i++) {
-      const col = productMfFinal[i];
-      const v = sourceRow[col];
-      if (!isEmpty(v)) outRow[productMfColumns[i]] = toStr(v);
+    for (let i = 0; i < PRODUCT_METAFIELD_SPECS.length; i++) {
+      const spec = PRODUCT_METAFIELD_SPECS[i];
+      const colHeader = productMfColumns[i];
+
+      const rawVal = sourceRow[spec.source];
+      if (isEmpty(rawVal)) continue;
+
+      if (spec.type === "boolean") {
+        const b = normalizeBoolean(rawVal);
+        if (b) outRow[colHeader] = b;
+        continue;
+      }
+
+      if (spec.type === "list.single_line_text_field") {
+        const listVal = normalizeListSingleLineText(rawVal);
+        if (listVal) outRow[colHeader] = listVal;
+        continue;
+      }
+
+      // number_decimal/date/string -> pass-through as string
+      outRow[colHeader] = toStr(rawVal);
     }
   }
 
+  // ✅ NEW: attach variant metafields (only modal_number)
   function attachVariantMetafields(outRow, sourceRow) {
-    for (let i = 0; i < variantMfFinal.length; i++) {
-      const col = variantMfFinal[i];
-      const v = sourceRow[col];
-      if (!isEmpty(v)) outRow[variantMfColumns[i]] = toStr(v);
+    for (let i = 0; i < VARIANT_METAFIELD_SPECS.length; i++) {
+      const spec = VARIANT_METAFIELD_SPECS[i];
+      const colHeader = variantMfColumns[i];
+
+      const rawVal =
+        sourceRow?.[spec.source] ??
+        (spec.fallbackSource ? sourceRow?.[spec.fallbackSource] : undefined);
+
+      if (isEmpty(rawVal)) continue;
+
+      // type is string -> pass-through as string
+      outRow[colHeader] = toStr(rawVal);
     }
   }
 
@@ -1842,16 +639,7 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
 
         console.log("Header parsed. Total columns:", inputHeaders.length);
 
-        const eligible = rawHeaders
-          .map((h) => toStr(h).trim())
-          .filter((h) => h && !DIRECT_USED_COLUMNS.has(slugify(h).replace(/-/g, "_")));
-
-        productMfFinal = eligible.slice(0, MAX_PRODUCT_METAFIELDS);
-        variantMfFinal = eligible.slice(0, MAX_VARIANT_METAFIELDS);
-
-        productMfColumns = productMfFinal.map((col) => `Metafield: ${MF_NAMESPACE}.${toMetafieldKey(col)} [string]`);
-        variantMfColumns = variantMfFinal.map((col) => `Variant Metafield: ${MF_NAMESPACE}.${toMetafieldKey(col)} [string]`);
-
+        // Output header = base Shopify + product metafields + variant metafields
         outputHeader = [...SHOPIFY_COLUMNS, ...productMfColumns, ...variantMfColumns];
 
         outWs.columns = outputHeader.map((h) => ({ header: h, key: h }));
@@ -1878,7 +666,13 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
         }
 
         const handle = toStr(rowObj.url_key).trim() ? slugify(rowObj.url_key) : slugify(rowObj.name || rowObj.sku);
-        const { price, compareAt } = getPriceAndCompare(rowObj);
+
+        // ===== PRICE RULES (as per your existing logic) =====
+        // Variant Price = special_price (as-is, no compare logic)
+        // Variant Compare At Price = msrp_price (as-is)
+        const specialPrice = safeNumber(rowObj.special_price);
+        const msrpPrice = safeNumber(rowObj.msrp_price);
+
         const qty = safeNumber(rowObj.qty);
 
         const out = makeEmptyRowObj(outputHeader);
@@ -1888,6 +682,13 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
         out["Handle"] = handle;
         out["Title"] = toStr(rowObj.name);
         out["Body HTML"] = toStr(rowObj.description || rowObj.short_description);
+
+        // Vendor = manufacturer
+        out["Vendor"] = toStr(rowObj.manufacturer);
+
+        // ✅ (4) NEW: put simple/configurable into Shopify "Type" column
+        out["Type"] = "simple";
+
         out["Status"] = getStatus(rowObj);
         out["Published"] = getPublished(rowObj);
         out["Created At"] = toStr(rowObj.created_at);
@@ -1907,9 +708,13 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
         out["Option1 Value"] = "Default Title";
 
         out["Variant SKU"] = sku;
-        out["Variant Price"] = price === "" ? "" : String(price);
-        out["Variant Compare At Price"] = compareAt === "" ? "" : String(compareAt);
+
+        out["Variant Price"] = specialPrice > 0 ? String(specialPrice) : "";
+        out["Variant Compare At Price"] = msrpPrice > 0 ? String(msrpPrice) : "";
+
         out["Variant Inventory Qty"] = String(qty || 0);
+        out["Inventory Available: Shop location"] = String(qty || 0);
+
 
         const w = safeNumber(rowObj.weight);
         if (w > 0) {
@@ -1923,6 +728,8 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
         out["Variant Taxable"] = "TRUE";
 
         attachProductMetafields(out, rowObj);
+
+        // ✅ NEW: variant metafield for simple products too (if column exists)
         attachVariantMetafields(out, rowObj);
 
         writeRow(out);
@@ -1957,7 +764,7 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
       logs.push(`WARN: Unhandled product_type="${pt}" for SKU=${sku}`);
     }
 
-    break; // only first worksheet
+    break;
   }
 
   // PHASE 2: build configurable products from spooled data
@@ -1975,19 +782,20 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
       console.log("Configurable build progress:", p, "/", parentOrder.length);
     }
 
-    if (!fs.existsSync(parentPath)) continue; // safety
+    if (!fs.existsSync(parentPath)) continue;
 
     const parent = JSON.parse(fs.readFileSync(parentPath, "utf8"));
-    const children = await readJsonLines(childPath); // may be empty
+    const children = await readJsonLines(childPath);
 
-    // Build output rows exactly like your old flush logic
     if (!children.length) {
       logs.push(`INFO: Configurable parent has NO children rows. SKU=${parentSku} (will create Default Title variant)`);
 
       const handleBase = toStr(parent.url_key).trim() ? slugify(parent.url_key) : slugify(parent.name || parentSku);
       const handle = handleBase || slugify(parentSku || `product-${rowNum}`);
 
-      const { price, compareAt } = getPriceAndCompare(parent);
+      const specialPrice = safeNumber(parent.special_price);
+      const msrpPrice = safeNumber(parent.msrp_price);
+
       const qty = safeNumber(parent.qty);
 
       const out = makeEmptyRowObj(outputHeader);
@@ -1997,6 +805,12 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
 
       out["Title"] = toStr(parent.name);
       out["Body HTML"] = toStr(parent.description || parent.short_description);
+
+      out["Vendor"] = toStr(parent.manufacturer);
+
+      // ✅ (4) NEW: product type
+      out["Type"] = "configurable";
+
       out["Status"] = getStatus(parent);
       out["Published"] = getPublished(parent);
       out["Created At"] = toStr(parent.created_at);
@@ -2016,9 +830,13 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
       out["Option1 Value"] = "Default Title";
 
       out["Variant SKU"] = parentSku;
-      out["Variant Price"] = price === "" ? "" : String(price);
-      out["Variant Compare At Price"] = compareAt === "" ? "" : String(compareAt);
+
+      out["Variant Price"] = specialPrice > 0 ? String(specialPrice) : "";
+      out["Variant Compare At Price"] = msrpPrice > 0 ? String(msrpPrice) : "";
+
       out["Variant Inventory Qty"] = String(qty || 0);
+      out["Inventory Available: Shop location"] = String(qty || 0);
+
 
       const w = safeNumber(parent.weight);
       if (w > 0) {
@@ -2032,6 +850,8 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
       out["Variant Taxable"] = "TRUE";
 
       attachProductMetafields(out, parent);
+
+      // ✅ NEW: variant metafield (if present on parent row)
       attachVariantMetafields(out, parent);
 
       writeRow(out);
@@ -2067,6 +887,12 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
         if (isTop) {
           out["Title"] = toStr(parent.name);
           out["Body HTML"] = toStr(parent.description || parent.short_description);
+
+          out["Vendor"] = toStr(parent.manufacturer);
+
+          // ✅ (4) NEW: product type (only on top row like other product fields)
+          out["Type"] = "configurable";
+
           out["Status"] = getStatus(parent);
           out["Published"] = getPublished(parent);
           out["Created At"] = toStr(parent.created_at);
@@ -2085,13 +911,16 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
           attachProductMetafields(out, parent);
         }
 
-        const { price, compareAt } = getPriceAndCompare(child);
+        const specialPrice = safeNumber(child.special_price);
+        const msrpPrice = safeNumber(child.msrp_price);
         const qty = safeNumber(child.qty);
 
         out["Variant SKU"] = childSku;
-        out["Variant Price"] = price === "" ? "" : String(price);
-        out["Variant Compare At Price"] = compareAt === "" ? "" : String(compareAt);
+        out["Variant Price"] = specialPrice > 0 ? String(specialPrice) : "";
+        out["Variant Compare At Price"] = msrpPrice > 0 ? String(msrpPrice) : "";
         out["Variant Inventory Qty"] = String(qty || 0);
+        out["Inventory Available: Shop location"] = String(qty || 0);
+
 
         const vImg = pickFirstImage(child, logs);
         if (vImg) out["Variant Image"] = vImg;
@@ -2124,6 +953,7 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
         out["Variant Requires Shipping"] = "TRUE";
         out["Variant Taxable"] = "TRUE";
 
+        // ✅ (3) NEW: variant metafield modal_number from CHILD row
         attachVariantMetafields(out, child);
 
         writeRow(out);
@@ -2131,11 +961,11 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
       }
     }
 
-    // cleanup child file for this parent so leftovers truly mean orphan
-    if (fs.existsSync(childPath)) fs.unlinkSync(childPath);
+    // FIX #1: safe unlink with retry (Windows EBUSY)
+    await safeUnlink(childPath, logs);
   }
 
-  // leftover children files are orphans (parent never existed)
+  // leftover children files are orphans -> log + delete
   const remainingChildFiles = fs.existsSync(childrenDir) ? fs.readdirSync(childrenDir) : [];
   for (const f of remainingChildFiles) {
     const fp = path.join(childrenDir, f);
@@ -2144,6 +974,8 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
       logs.push(`WARN: Orphan children file ${f} has ${orphanChildren.length} rows (parent missing in sheet).`);
     } catch (e) {
       logs.push(`WARN: Could not read orphan children file ${f}: ${e?.message || String(e)}`);
+    } finally {
+      await safeUnlink(fp, logs);
     }
   }
 
@@ -2151,6 +983,9 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
   await outWb.commit();
 
   fs.writeFileSync(logPath, logs.join("\n"), "utf8");
+
+  // FIX #2: cleanup spool directory (parents + any leftovers)
+  safeRmdirRecursive(spoolDir, logs);
 
   console.log("========== STREAM CONVERSION COMPLETE ==========");
   console.log("Total input rows read:", totalReadRows);
@@ -2174,7 +1009,6 @@ export async function convertToShopifySheet(req, res) {
       });
     }
 
-    // your file type logs
     console.log("First 20 bytes:", req.file.buffer.slice(0, 20).toString("hex"));
     console.log("First 50 chars:", req.file.buffer.slice(0, 50).toString("utf8"));
 
