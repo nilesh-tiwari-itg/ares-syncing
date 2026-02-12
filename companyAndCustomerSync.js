@@ -73,22 +73,49 @@ const QUERY_SOURCE_COMPANY = `
       name
       externalId
       note
-      metafields(first: 50) {
-        edges {
-          node {
-            id
-            namespace
-            key
-            type
-            value
-          }
-        }
+    metafields(first: 250) {
+    edges {
+      node {
+        namespace
+        key
+        type
+        value
       }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
       locations(first: 50) {
         edges {
           node {
             id
             name
+            externalId
+            taxSettings {
+            taxExemptions
+            taxExempt
+            taxRegistrationId
+          }
+          buyerExperienceConfiguration {
+              checkoutToDraft
+              deposit {
+                ... on DepositPercentage {
+                  __typename
+                  percentage
+                }
+              }
+              editableShippingAddress
+              paymentTermsTemplate {
+                id
+                name
+                description
+                dueInDays
+                paymentTermsType
+                translatedName
+              }
+            }
             shippingAddress {
               firstName
               lastName
@@ -102,6 +129,7 @@ const QUERY_SOURCE_COMPANY = `
               zoneCode
               phone
               companyName
+              recipient
             }
             billingAddress {
               firstName
@@ -116,6 +144,7 @@ const QUERY_SOURCE_COMPANY = `
               zoneCode
               phone
               companyName
+              recipient
             }
           }
         }
@@ -230,6 +259,23 @@ const QUERY_COMPANY_ORDERS_CONNECTION = `
     }
   }
 `;
+const MUTATION_COMPANY_LOCATION_ASSIGN_ADDRESS = `
+  mutation companyLocationAssignAddress(
+    $locationId: ID!
+    $address: CompanyAddressInput!
+    $addressTypes: [CompanyAddressType!]!
+  ) {
+    companyLocationAssignAddress(
+      locationId: $locationId
+      address: $address
+      addressTypes: $addressTypes
+    ) {
+      addresses { id }
+      userErrors { field message }
+    }
+  }
+`;
+
 
 
 async function fetchCompanyOrdersCount2025(companyGid) {
@@ -357,6 +403,33 @@ const QUERY_SOURCE_ORDERS_BY_CUSTOMER = `
     }
   }
 `;
+function buildBuyerExperienceConfigurationInput(srcBec) {
+  if (!srcBec) return null;
+
+  const input = {};
+
+  // booleans
+  if (typeof srcBec.checkoutToDraft === "boolean") {
+    input.checkoutToDraft = srcBec.checkoutToDraft;
+  }
+  if (typeof srcBec.editableShippingAddress === "boolean") {
+    input.editableShippingAddress = srcBec.editableShippingAddress;
+  }
+
+  // deposit: you only query DepositPercentage, so map percentage -> DepositInput
+  const dep = srcBec.deposit;
+  if (dep?.__typename === "DepositPercentage" && typeof dep.percentage === "number") {
+    input.deposit = { percentage: dep.percentage };
+  }
+
+  // payment terms template id
+  const ptId = srcBec.paymentTermsTemplate?.id;
+  if (ptId) {
+    input.paymentTermsTemplateId = ptId;
+  }
+
+  return Object.keys(input).length ? input : null;
+}
 
 async function fetchSourceCompany(companyGid) {
   const data = await graphqlRequest(
@@ -461,23 +534,6 @@ const QUERY_TARGET_COMPANY_METAFIELDS = `
 `;
 
 
-const QUERY_TARGET_CONTACT_LOCATION_ROLES = `
-  query CompanyContacts($companyId: ID!) {
-    company(id: $companyId) {
-      contacts(first: 100) {
-        edges {
-          node {
-            id
-            customer {
-              id
-            }
-          }
-        }
-      }
-    }
-  }
-`;
-
 
 const QUERY_TARGET_COMPANY_CONTACT = `
   query CompanyContacts($companyId: ID!) {
@@ -573,6 +629,22 @@ const QUERY_TARGET_CUSTOMER_BY_EMAIL = `
     }
   }
 `;
+const MUTATION_COMPANY_LOCATION_UPDATE = `
+  mutation companyLocationUpdate($companyLocationId: ID!, $input: CompanyLocationUpdateInput!) {
+    companyLocationUpdate(companyLocationId: $companyLocationId, input: $input) {
+      companyLocation {
+        id
+        name
+        externalId
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
 
 // NEW: Find company by externalId on TARGET
 const QUERY_TARGET_COMPANY_BY_EXTERNAL_ID = `
@@ -591,11 +663,12 @@ const QUERY_TARGET_COMPANY_BY_EXTERNAL_ID = `
               }
             }
           }
-          locations(first: 50) {
+         locations(first: 50) {
             edges {
               node {
                 id
                 name
+                externalId
               }
             }
           }
@@ -670,6 +743,27 @@ const MUTATION_COMPANY_UPDATE = `
     }
   }
 `;
+const MUTATION_COMPANY_LOCATION_TAX_SETTINGS_UPDATE = `
+  mutation companyLocationTaxSettingsUpdate(
+    $companyLocationId: ID!,
+    $taxRegistrationId: String,
+    $taxExempt: Boolean,
+    $exemptionsToAssign: [TaxExemption!],
+    $exemptionsToRemove: [TaxExemption!]
+  ) {
+    companyLocationTaxSettingsUpdate(
+      companyLocationId: $companyLocationId,
+      taxRegistrationId: $taxRegistrationId,
+      taxExempt: $taxExempt,
+      exemptionsToAssign: $exemptionsToAssign,
+      exemptionsToRemove: $exemptionsToRemove
+    ) {
+      companyLocation { id }
+      userErrors { field message }
+    }
+  }
+`;
+
 
 const MUTATION_COMPANY_LOCATION_CREATE = `
   mutation companyLocationCreate($companyId: ID!, $input: CompanyLocationInput!) {
@@ -781,6 +875,209 @@ const MUTATION_ORDER_CREATE = `
     }
   }
 `;
+async function assignLocationAddressOnTarget(targetLocationId, addressInput, addressTypes, label) {
+  if (!addressInput) return;
+
+  const data = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    MUTATION_COMPANY_LOCATION_ASSIGN_ADDRESS,
+    {
+      locationId: targetLocationId,
+      address: addressInput,
+      addressTypes, // ["SHIPPING"], ["BILLING"], or ["SHIPPING","BILLING"]
+    },
+    label
+  );
+
+  const errs = data?.companyLocationAssignAddress?.userErrors || [];
+  if (errs.length) {
+    throw new Error(`companyLocationAssignAddress userErrors: ${JSON.stringify(errs)}`);
+  }
+}
+
+
+async function syncLocationTaxSettingsFromSourceOverride(srcLoc, targetLocationId) {
+  const tax = srcLoc?.taxSettings;
+  if (!tax) return;
+
+  // Fetch current target location tax exemptions so we can remove ones not in source
+  const QUERY_TARGET_LOCATION_TAX = `
+    query TargetLocationTax($id: ID!) {
+      companyLocation(id: $id) {
+        id
+        taxSettings {
+          taxExempt
+          taxExemptions
+          taxRegistrationId
+        }
+      }
+    }
+  `;
+
+  const current = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    QUERY_TARGET_LOCATION_TAX,
+    { id: targetLocationId },
+    "TargetLocationTax(TARGET)"
+  );
+
+  const tgtTax = current?.companyLocation?.taxSettings;
+  const srcEx = Array.isArray(tax.taxExemptions) ? tax.taxExemptions : [];
+  const tgtEx = Array.isArray(tgtTax?.taxExemptions) ? tgtTax.taxExemptions : [];
+
+  // override strategy: remove anything target has but source doesn't
+  const exemptionsToAssign = srcEx.filter(x => !tgtEx.includes(x));
+  const exemptionsToRemove = tgtEx.filter(x => !srcEx.includes(x));
+
+  const variables = {
+    companyLocationId: targetLocationId,
+    taxRegistrationId: tax.taxRegistrationId || null,
+    taxExempt: typeof tax.taxExempt === "boolean" ? tax.taxExempt : null,
+    exemptionsToAssign: exemptionsToAssign.length ? exemptionsToAssign : [],
+    exemptionsToRemove: exemptionsToRemove.length ? exemptionsToRemove : [],
+  };
+
+  const data = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    MUTATION_COMPANY_LOCATION_TAX_SETTINGS_UPDATE,
+    variables,
+    "companyLocationTaxSettingsUpdate(TARGET)"
+  );
+
+  const errs = data?.companyLocationTaxSettingsUpdate?.userErrors || [];
+  if (errs.length) {
+    throw new Error(`companyLocationTaxSettingsUpdate userErrors: ${JSON.stringify(errs)}`);
+  }
+
+  console.log(`🧾 Synced tax settings for TARGET location ${targetLocationId}`);
+}
+
+function buildCompanyLocationUpdateInputFromSourceLocation(srcLoc, fallbackCompanyName) {
+  const input = {
+    name: srcLoc.name || fallbackCompanyName,
+    externalId: srcLoc.externalId || null,
+  };
+
+  // Optional: note / phone / locale if you later add them to SOURCE query
+  input.note = srcLoc.note || null;
+  input.phone = srcLoc.phone || null;
+  input.locale = srcLoc.locale || null;
+
+  // Buyer Experience Config
+  const becInput = buildBuyerExperienceConfigurationInput(srcLoc.buyerExperienceConfiguration);
+  if (becInput) input.buyerExperienceConfiguration = becInput;
+
+  return input;
+}
+async function upsertCompanyLocationsOnTargetFromSource({
+  sourceCompany,
+  targetCompanyId,
+  existingCompany, // from QUERY_TARGET_COMPANY_BY_EXTERNAL_ID
+}) {
+  const srcLocations = sourceCompany.locations?.edges?.map(e => e.node) || [];
+  const tgtLocations = existingCompany?.locations?.edges?.map(e => e.node) || [];
+
+  // Build lookup maps for target locations
+  const targetByExternalId = new Map();
+  const targetByName = new Map();
+
+  for (const t of tgtLocations) {
+    if (t.externalId) targetByExternalId.set(String(t.externalId).trim(), t);
+    if (t.name) targetByName.set(String(t.name).trim(), t);
+  }
+
+  const sourceLocationIdToTargetLocationId = new Map();
+
+  for (const srcLoc of srcLocations) {
+    // Match rule: externalId first, fallback to name
+    const extKey = srcLoc.externalId ? String(srcLoc.externalId).trim() : null;
+    const nameKey = srcLoc.name ? String(srcLoc.name).trim() : null;
+
+    const match =
+      (extKey && targetByExternalId.get(extKey)) ||
+      (nameKey && targetByName.get(nameKey)) ||
+      null;
+
+    // If SOURCE location has no shipping address, skip (same rule as create)
+    const shippingAddressInput = buildCompanyAddressInput(srcLoc.shippingAddress);
+    if (!shippingAddressInput) {
+      console.log(`⚠️ Skipping SOURCE location without shippingAddress: ${srcLoc.id} (${srcLoc.name})`);
+      continue;
+    }
+
+    if (match) {
+      // UPDATE existing location
+      const input = buildCompanyLocationUpdateInputFromSourceLocation(srcLoc, sourceCompany.name);
+
+      const data = await graphqlRequest(
+        TARGET_GQL,
+        TARGET_ACCESS_TOKEN,
+        MUTATION_COMPANY_LOCATION_UPDATE,
+        {
+          companyLocationId: match.id,
+          input,
+        },
+        "companyLocationUpdate(TARGET)"
+      );
+
+      const errs = data?.companyLocationUpdate?.userErrors || [];
+      if (errs.length) {
+        throw new Error(`companyLocationUpdate userErrors: ${JSON.stringify(errs, null, 2)}`);
+      }
+
+      console.log(`🔄 Updated location on TARGET: ${srcLoc.name} → ${match.id}`);
+      // ✅ Update SHIPPING address
+      await assignLocationAddressOnTarget(
+        match.id,
+        buildCompanyAddressInput(srcLoc.shippingAddress),
+        ["SHIPPING"],
+        "companyLocationAssignAddress(SHIPPING)"
+      );
+
+      // ✅ Update BILLING address (if present)
+      const billingInput = buildCompanyAddressInput(srcLoc.billingAddress);
+      if (billingInput) {
+        await assignLocationAddressOnTarget(
+          match.id,
+          billingInput,
+          ["BILLING"],
+          "companyLocationAssignAddress(BILLING)"
+        );
+      }
+      await syncLocationTaxSettingsFromSourceOverride(srcLoc, match.id);
+
+      sourceLocationIdToTargetLocationId.set(srcLoc.id, match.id);
+    } else {
+      // CREATE missing location
+      const createInput = buildCompanyLocationInputFromSourceLocation(srcLoc, sourceCompany.name);
+      if (!createInput) continue;
+
+      const locData = await graphqlRequest(
+        TARGET_GQL,
+        TARGET_ACCESS_TOKEN,
+        MUTATION_COMPANY_LOCATION_CREATE,
+        { companyId: targetCompanyId, input: createInput },
+        "companyLocationCreate(TARGET existing-company upsert)"
+      );
+
+      const locErrors = locData?.companyLocationCreate?.userErrors || [];
+      if (locErrors.length) {
+        throw new Error(`companyLocationCreate userErrors: ${JSON.stringify(locErrors)}`);
+      }
+
+      const newLoc = locData?.companyLocationCreate?.companyLocation;
+      if (newLoc?.id) {
+        console.log(`🆕 Created missing location on TARGET: ${srcLoc.name} → ${newLoc.id}`);
+        sourceLocationIdToTargetLocationId.set(srcLoc.id, newLoc.id);
+      }
+    }
+  }
+
+  return sourceLocationIdToTargetLocationId;
+}
 
 /**
  * Convert metafield nodes -> MetafieldsSetInput[]
@@ -820,6 +1117,40 @@ function buildMetafieldMap(connection) {
     };
   }
   return map;
+}
+function buildCompanyLocationInputFromSourceLocation(srcLoc, fallbackCompanyName) {
+  const shippingAddressInput = buildCompanyAddressInput(srcLoc.shippingAddress);
+  const billingAddressInput = buildCompanyAddressInput(srcLoc.billingAddress);
+
+  // If shipping is missing, we skip (same as your create logic)
+  if (!shippingAddressInput) return null;
+
+  const locInput = {
+    name: srcLoc.name || fallbackCompanyName,
+    externalId: srcLoc.externalId,
+    shippingAddress: shippingAddressInput,
+    billingSameAsShipping: !billingAddressInput,
+  };
+
+  if (billingAddressInput) {
+    locInput.billingAddress = billingAddressInput;
+  }
+
+  // tax
+  const tax = srcLoc.taxSettings;
+  if (tax) {
+    locInput.taxExempt = !!tax.taxExempt;
+    if (Array.isArray(tax.taxExemptions)) locInput.taxExemptions = tax.taxExemptions;
+    if (tax.taxRegistrationId) locInput.taxRegistrationId = tax.taxRegistrationId;
+  }
+
+  // buyer experience config
+  const becInput = buildBuyerExperienceConfigurationInput(srcLoc.buyerExperienceConfiguration);
+  if (becInput) {
+    locInput.buyerExperienceConfiguration = becInput;
+  }
+
+  return locInput;
 }
 
 function mergeMetafields(sourceConn, targetConn, ownerId) {
@@ -1048,8 +1379,19 @@ async function upsertCustomerOnTargetFromSource(sourceCustomer, tier) {
 
     // Full sync update for existing customers
     await updateCustomerOnTargetFromSource(sourceCustomer, tier, targetCustomer);
-    await updateCustomerEmailConsentOnTargetFromSource(sourceCustomer, targetCustomer);
-    await updateCustomerSmsConsentOnTargetFromSource(sourceCustomer, targetCustomer);
+    // await updateCustomerEmailConsentOnTargetFromSource(sourceCustomer, targetCustomer);
+    // await updateCustomerSmsConsentOnTargetFromSource(sourceCustomer, targetCustomer);
+    try {
+      await updateCustomerEmailConsentOnTargetFromSource(sourceCustomer, targetCustomer);
+    } catch (e) {
+      console.log(`⚠️ Email consent sync failed for ${email}: ${e.message}`);
+    }
+
+    try {
+      await updateCustomerSmsConsentOnTargetFromSource(sourceCustomer, targetCustomer);
+    } catch (e) {
+      console.log(`⚠️ SMS consent sync failed for ${email}: ${e.message}`);
+    }
   } else {
     // Create new customer
     const addr = sourceCustomer.defaultAddress;
@@ -1168,13 +1510,14 @@ function buildCompanyAddressInput(addr) {
     firstName: addr.firstName,
     lastName: addr.lastName,
     address1: addr.address1,
+    recipient: addr.recipient,
     address2: addr.address2,
     city: addr.city,
     zoneCode: addr.zoneCode,
     zip: addr.zip,
     countryCode: addr.countryCode,
     phone: addr.phone,
-    recipient: addr.companyName,
+    recipient: addr.recipient,
   };
 }
 
@@ -1213,12 +1556,25 @@ async function createCompanyOnTargetFromSource(sourceCompany, orderCount2025) {
     if (shippingAddressInput) {
       input.companyLocation = {
         name: firstLoc.name || companyName,
+        externalId: firstLoc.externalId,
         shippingAddress: shippingAddressInput,
         billingSameAsShipping: !billingAddressInput,
       };
       if (billingAddressInput) {
         input.companyLocation.billingAddress = billingAddressInput;
       }
+      // ✅ Copy tax settings for the first location (created via companyCreate)
+      const tax = firstLoc.taxSettings;
+      if (tax) {
+        input.companyLocation.taxExempt = !!tax.taxExempt;
+        if (Array.isArray(tax.taxExemptions)) input.companyLocation.taxExemptions = tax.taxExemptions;
+        if (tax.taxRegistrationId) input.companyLocation.taxRegistrationId = tax.taxRegistrationId;
+      }
+      const becInput = buildBuyerExperienceConfigurationInput(firstLoc.buyerExperienceConfiguration);
+      if (becInput) {
+        input.companyLocation.buyerExperienceConfiguration = becInput;
+      }
+
     } else {
       console.log(
         `⚠️ First source location ${firstLoc.id} has no shipping address; creating company without initial location`
@@ -1285,9 +1641,22 @@ async function createCompanyOnTargetFromSource(sourceCompany, orderCount2025) {
 
     const locInput = {
       name: srcLoc.name || companyName,
+      externalId: srcLoc.externalId,
       shippingAddress: shippingAddressInput,
       billingSameAsShipping: !billingAddressInput,
     };
+    // ✅ Copy tax settings for each additional location
+    const tax = srcLoc.taxSettings;
+    if (tax) {
+      locInput.taxExempt = !!tax.taxExempt;
+      if (Array.isArray(tax.taxExemptions)) locInput.taxExemptions = tax.taxExemptions;
+      if (tax.taxRegistrationId) locInput.taxRegistrationId = tax.taxRegistrationId;
+    }
+
+    const becInput = buildBuyerExperienceConfigurationInput(srcLoc.buyerExperienceConfiguration);
+    if (becInput) {
+      locInput.buyerExperienceConfiguration = becInput;
+    }
 
     if (billingAddressInput) {
       locInput.billingAddress = billingAddressInput;
@@ -1626,80 +1995,6 @@ async function syncCompanyContactRolesFromSource({
   }
 }
 
-/**
- * Create order on TARGET using orderCreate (NOT wired in main yet)
- */
-async function createOrderViaOrderCreate_GQL(sourceOrder, targetCustomer) {
-  try {
-    const currency =
-      sourceOrder.currentTotalPriceSet?.shopMoney?.currencyCode || "USD";
-
-    const lineItems = (sourceOrder.lineItems?.edges || []).map((edge) => {
-      const li = edge.node;
-      return {
-        title: li.name,
-        quantity: li.quantity,
-        priceSet: {
-          shopMoney: {
-            amount: li.originalUnitPriceSet?.shopMoney?.amount || "0.0",
-            currencyCode: currency,
-          },
-        },
-      };
-    });
-
-    const totalAmount =
-      sourceOrder.currentTotalPriceSet?.shopMoney?.amount || "0.0";
-
-    const orderInput = {
-      currency,
-      customerId: targetCustomer.id,
-      email: targetCustomer.email,
-      tags: sourceOrder.tags || [],
-      note: sourceOrder.note,
-      lineItems,
-      transactions: [
-        {
-          kind: "SALE",
-          status: "SUCCESS",
-          amountSet: {
-            shopMoney: {
-              amount: totalAmount,
-              currencyCode: currency,
-            },
-          },
-        },
-      ],
-    };
-
-    const variables = {
-      order: orderInput,
-      options: {}, // only idempotencyKey is allowed; omitted for now
-    };
-
-    const res = await graphqlRequest(
-      TARGET_GQL,
-      TARGET_ACCESS_TOKEN,
-      MUTATION_ORDER_CREATE,
-      variables,
-      "orderCreate(TARGET)"
-    );
-
-    const errs = res?.orderCreate?.userErrors || [];
-    if (errs.length) {
-      throw new Error(`orderCreate userErrors: ${JSON.stringify(errs)}`);
-    }
-
-    console.log(
-      `🧾 Created order on TARGET: ${res.orderCreate.order.name} (${res.orderCreate.order.id})`
-    );
-
-    return res.orderCreate.order;
-  } catch (error) {
-    console.error("----create order Error", error);
-    throw error;
-  }
-}
 
 /**
  * Sync logic per COMPANY:
@@ -1721,6 +2016,11 @@ async function syncSingleCompany(companyIdOrGid) {
     // 1) Fetch company from SOURCE
     const sourceCompany = await fetchSourceCompany(companyGid);
     console.log(`SOURCE company: ${sourceCompany.name} (${sourceCompany.id})`);
+    if (sourceCompany?.metafields?.pageInfo?.hasNextPage) {
+      console.log(
+        `⚠️ SOURCE company metafields exceed 250. You are only copying the first 250 for ${sourceCompany.id}`
+      );
+    }
     const orderCount2025 = await fetchCompanyOrdersCount2025(companyGid);
     console.log(`📦 B2B 2025 order count for company: ${orderCount2025}`);
     const tier =
@@ -1760,7 +2060,8 @@ async function syncSingleCompany(companyIdOrGid) {
         );
 
         // Update company basic fields
-        await updateCompanyOnTargetFromSource(sourceCompany, targetCompanyId);
+        // await updateCompanyOnTargetFromSource(sourceCompany, targetCompanyId);
+        await updateCompanyOnTargetFromSource(sourceCompany, targetCompanyId, orderCount2025);
 
         // Build role map from existing company
         roleNameToTargetRoleId = {};
@@ -1771,19 +2072,34 @@ async function syncSingleCompany(companyIdOrGid) {
         });
 
         // Build location map by matching names
-        sourceLocationIdToTargetLocationId = new Map();
-        const srcLocations = sourceCompany.locations?.edges?.map((e) => e.node) || [];
-        const tgtLocations = existingCompany.locations?.edges?.map((e) => e.node) || [];
+        // sourceLocationIdToTargetLocationId = new Map();
+        // const srcLocations = sourceCompany.locations?.edges?.map((e) => e.node) || [];
+        // const tgtLocations = existingCompany.locations?.edges?.map((e) => e.node) || [];
 
-        for (const srcLoc of srcLocations) {
-          const match = tgtLocations.find((t) => t.name === srcLoc.name);
-          if (match) {
-            sourceLocationIdToTargetLocationId.set(srcLoc.id, match.id);
-            console.log(
-              `🏬 (existing) Location mapped by name: ${srcLoc.name} (${srcLoc.id}) → ${match.id}`
-            );
-          }
+        // for (const srcLoc of srcLocations) {
+        //   const match = tgtLocations.find((t) => t.name === srcLoc.name);
+        //   if (match) {
+        //     sourceLocationIdToTargetLocationId.set(srcLoc.id, match.id);
+        //     console.log(
+        //       `🏬 (existing) Location mapped by name: ${srcLoc.name} (${srcLoc.id}) → ${match.id}`
+        //     );
+        //   }
+        // }
+
+
+        // ✅ Upsert locations (update existing + create missing) and return mapping
+        try {
+          sourceLocationIdToTargetLocationId = await upsertCompanyLocationsOnTargetFromSource({
+            sourceCompany,
+            targetCompanyId,
+            existingCompany,
+          });
+        } catch (e) {
+          console.error(`⚠️ Location upsert failed for existing company ${targetCompanyId}: ${e.message}`);
+          // IMPORTANT: do NOT create company here — it already exists
+          // Just continue with whatever mapping you have (or keep empty map).
         }
+
       } else {
         // No existing company found → create new
         ({
@@ -1796,11 +2112,11 @@ async function syncSingleCompany(companyIdOrGid) {
       console.error(
         `⚠️ Failed checking company existence on TARGET, creating new: ${lookupError.message}`
       );
-      ({
-        companyId: targetCompanyId,
-        sourceLocationIdToTargetLocationId,
-        roleNameToTargetRoleId,
-      } = await createCompanyOnTargetFromSource(sourceCompany, orderCount2025));
+      // ({
+      //   companyId: targetCompanyId,
+      //   sourceLocationIdToTargetLocationId,
+      //   roleNameToTargetRoleId,
+      // } = await createCompanyOnTargetFromSource(sourceCompany, orderCount2025));
     }
 
     // 3) For each contact, sync customer + contact + roles (+ orders later)
@@ -1871,20 +2187,7 @@ async function syncSingleCompany(companyIdOrGid) {
         }`
       );
 
-      /*
-      for (const order of sourceOrders) {
-        try {
-          await createOrderViaOrderCreate_GQL(order, targetCustomer);
-        } catch (e) {
-          console.error(
-            `❌ Failed to create order ${order.id} for customer ${
-              srcCust.email || srcCust.id
-            }:`,
-            e.message
-          );
-        }
-      }
-      */
+
     }
 
     console.log(`✅ Finished syncing company ${sourceCompany.name} (${companyGid})`);

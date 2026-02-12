@@ -11,6 +11,7 @@ import { migrateCompanies } from './companiesSync.js';
 import { syncBlogsAndArticles } from './blogSync.js';
 import { migrateFiles } from './fileupload.js';
 import { syncPagesFromSheet } from './pagesSync.js';
+import { convertToShopifySheet } from './shpoifySheetFormat.js';
 const upload = multer();
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -43,6 +44,7 @@ app.use("/smart-collection", upload.single("file"), migrateSmartCollections);
 // app.use("/pdffiles", upload.single("file"),migrateFiles );
 app.use("/blogs", upload.single("file"), syncBlogsAndArticles);
 app.use("/pages", upload.single("file"), syncPagesFromSheet);
+app.use("/parseSheet", upload.single("file"), convertToShopifySheet);
 
 // Start server
 app.listen(PORT, () => {
