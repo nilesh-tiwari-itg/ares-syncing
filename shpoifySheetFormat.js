@@ -267,6 +267,10 @@ const PRODUCT_METAFIELD_SPECS = [
   // ✅ (2) NEW product metafield: warranty_product (sheet column: warranty_product)
   { key: "warranty_product", type: "single_line_text_field", source: "warranty_product" },
   { key: "shipperhq_shipping_group", type: "single_line_text_field", source: "shipperhq_shipping_group" },
+
+  // ✅ NEW (your request): store parent configurable SKU on the product (not variants)
+  // Only populate for configurable parents.
+  { key: "main_product_sku", type: "single_line_text_field", source: "sku", onlyForConfigurable: true },
 ];
 
 /**
@@ -322,6 +326,17 @@ function normalizeImageUrl(src) {
   const baseFixed = base.endsWith("/") ? base : base + "/";
   const pathFixed = s.startsWith("/") ? s.slice(1) : s;
   return baseFixed + pathFixed;
+}
+
+// ✅ FIX (your issue #1): parent_sku sometimes contains "OLD_PARENT,NEW_PARENT"
+// Rule requested: take the second/new one (safe: take the last non-empty).
+function normalizeParentSku(parentSkuRaw) {
+  const raw = toStr(parentSkuRaw).trim();
+  if (!raw) return "";
+  if (!raw.includes(",")) return raw;
+  const parts = raw.split(",").map((x) => x.trim()).filter(Boolean);
+  if (!parts.length) return "";
+  return parts[parts.length - 1];
 }
 
 function toMetafieldKey(colName) {
@@ -575,9 +590,14 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
   }
 
   function attachProductMetafields(outRow, sourceRow) {
+    const pt = toStr(sourceRow?.product_type).trim().toLowerCase();
+
     for (let i = 0; i < PRODUCT_METAFIELD_SPECS.length; i++) {
       const spec = PRODUCT_METAFIELD_SPECS[i];
       const colHeader = productMfColumns[i];
+
+      // ✅ Only fill for configurable parents when requested
+      if (spec.onlyForConfigurable && pt !== "configurable") continue;
 
       const rawVal = sourceRow[spec.source];
       if (isEmpty(rawVal)) continue;
@@ -661,12 +681,13 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
 
       const pt = toStr(rowObj.product_type).trim().toLowerCase();
       const sku = toStr(rowObj.sku).trim();
-      const parentSku = toStr(rowObj.parent_sku).trim();
+      const parentSkuRaw = toStr(rowObj.parent_sku).trim();
+      const parentSku = normalizeParentSku(parentSkuRaw); // ✅ FIX: resolved parent sku
 
       if (!sku && !pt) continue;
 
       // SIMPLE standalone -> write immediately
-      if (pt === "simple" && isEmpty(parentSku)) {
+      if (pt === "simple" && isEmpty(parentSkuRaw)) {
         simpleCount++;
 
         if (totalReadRows % 5000 === 0) {
@@ -753,8 +774,14 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
       }
 
       // CHILD variant -> spool
-      if (pt === "simple" && !isEmpty(parentSku)) {
+      if (pt === "simple" && !isEmpty(parentSkuRaw)) {
         childCount++;
+
+        // ✅ log when we had to resolve comma-separated parent_sku
+        if (parentSkuRaw && parentSku && parentSkuRaw !== parentSku) {
+          logs.push(`INFO: parent_sku had multiple values. Using resolved parent_sku="${parentSku}" (raw="${parentSkuRaw}") for child SKU=${sku}`);
+        }
+
         spoolChildRow(parentSku, rowObj);
 
         if (childCount % 5000 === 0) {
