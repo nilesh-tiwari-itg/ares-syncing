@@ -1,4 +1,3 @@
-
 //chunk file read but not orphan in json creating then read-------------------------------------------------------------------------
 import fs from "fs";
 import path from "path";
@@ -10,6 +9,10 @@ import { Readable } from "stream";
 /** ---------- CONFIG ---------- **/
 const OUTPUT_DIR = path.join(process.cwd(), "tmp", "shopify_exports");
 const MF_NAMESPACE = "magento";
+
+// ✅ FIX (1): base domain prefix for non-absolute image paths
+// (You asked to add https://domain.com/ in Image Src + Variant Image)
+const IMAGE_BASE_URL = "https://www.burkett.com/media/catalog/product";
 
 // NOTE: We were NOT generating Variant Metafields earlier.
 // Now we will generate ONLY ONE variant metafield: modal_number.
@@ -263,18 +266,15 @@ const PRODUCT_METAFIELD_SPECS = [
 
   // ✅ (2) NEW product metafield: warranty_product (sheet column: warranty_product)
   { key: "warranty_product", type: "single_line_text_field", source: "warranty_product" },
-    { key: "shipperhq_shipping_group", type: "single_line_text_field", source: "shipperhq_shipping_group" },
-
+  { key: "shipperhq_shipping_group", type: "single_line_text_field", source: "shipperhq_shipping_group" },
 ];
 
 /**
- * ✅ (3) NEW: Variant metafield specs (ONLY modal_number)
- * - If your sheet column is exactly "modal_number" this will work.
- * - Added a safe fallback to "model_number" in case your source uses that spelling.
+ * ✅ (3) Variant metafield specs
  */
 const VARIANT_METAFIELD_SPECS = [
   { key: "modal_number", type: "single_line_text_field", source: "modal_number", fallbackSource: "model_number" },
-   { key: "price", type: "single_line_text_field", source: "price" },
+  { key: "price", type: "single_line_text_field", source: "price" },
 ];
 
 /** ---------- HELPERS ---------- **/
@@ -308,6 +308,20 @@ function slugify(text) {
 
 function isAbsoluteUrl(u) {
   return /^https?:\/\//i.test(String(u || ""));
+}
+
+// ✅ FIX (1): if image path is relative, prefix IMAGE_BASE_URL
+function normalizeImageUrl(src) {
+  const s = toStr(src).trim();
+  if (!s) return "";
+  if (isAbsoluteUrl(s)) return s;
+
+  const base = String(IMAGE_BASE_URL || "").trim();
+  if (!base) return s;
+
+  const baseFixed = base.endsWith("/") ? base : base + "/";
+  const pathFixed = s.startsWith("/") ? s.slice(1) : s;
+  return baseFixed + pathFixed;
 }
 
 function toMetafieldKey(colName) {
@@ -376,9 +390,17 @@ function getPublished(row) {
 
 function pickFirstImage(row, logs) {
   const img = row.base_image || row.small_image || row.thumbnail_image || row.swatch_image || "";
-  const src = toStr(img).trim();
-  if (src && !isAbsoluteUrl(src)) logs.push(`WARN: Image is not absolute URL: "${src}" (SKU=${row.sku || "?"})`);
-  return src;
+  const raw = toStr(img).trim();
+  if (!raw) return "";
+
+  const fixed = normalizeImageUrl(raw);
+
+  // keep a warning if it was not absolute originally (optional log only)
+  if (raw && !isAbsoluteUrl(raw)) {
+    logs.push(`WARN: Image was not absolute URL. Prefixed base domain. Raw="${raw}", Fixed="${fixed}" (SKU=${row.sku || "?"})`);
+  }
+
+  return fixed;
 }
 
 function makeEmptyRowObj(header) {
@@ -437,9 +459,7 @@ function normalizeListSingleLineText(v) {
 }
 
 /**
- * FIX #1 (EBUSY unlink on Windows):
- * - unlinkSync can fail if a stream (readJsonLines) still holds the file handle briefly.
- * - We add a small retry with backoff, and fall back to rename+delete later.
+ * FIX #1 (EBUSY unlink on Windows)
  */
 async function safeUnlink(filePath, logs, tries = 6) {
   if (!filePath) return;
@@ -452,17 +472,14 @@ async function safeUnlink(filePath, logs, tries = 6) {
     } catch (err) {
       const code = err?.code;
       if (code === "EBUSY" || code === "EPERM") {
-        // wait a bit and retry
         await new Promise((r) => setTimeout(r, 50 * (i + 1)));
         continue;
       }
-      // other errors: log and stop retrying
       logs?.push?.(`WARN: safeUnlink failed for ${filePath}: ${err?.message || String(err)}`);
       return;
     }
   }
 
-  // last resort: rename so the job can finish; delete in final cleanup
   try {
     const renamed = `${filePath}.delete_${Date.now()}`;
     fs.renameSync(filePath, renamed);
@@ -473,12 +490,7 @@ async function safeUnlink(filePath, logs, tries = 6) {
 }
 
 /**
- * FIX #2 (too many spool files):
- * - We already delete each child file after using it.
- * - Add final cleanup to remove:
- *   - remaining orphan child files
- *   - parent json files
- *   - spool folders (parents/children/spoolDir)
+ * FIX #2 (cleanup)
  */
 function safeRmdirRecursive(dirPath, logs) {
   if (!dirPath) return;
@@ -536,7 +548,7 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
     return `Metafield: ${MF_NAMESPACE}.${key} [${m.type}]`;
   });
 
-  // ✅ NEW: Build variant metafield columns (only modal_number)
+  // Build variant metafield columns
   const variantMfColumns = VARIANT_METAFIELD_SPECS.map((m) => {
     const key = toMetafieldKey(m.key);
     return `Variant Metafield: ${MF_NAMESPACE}.${key} [${m.type}]`;
@@ -582,12 +594,10 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
         continue;
       }
 
-      // number_decimal/date/string -> pass-through as string
       outRow[colHeader] = toStr(rawVal);
     }
   }
 
-  // ✅ NEW: attach variant metafields (only modal_number)
   function attachVariantMetafields(outRow, sourceRow) {
     for (let i = 0; i < VARIANT_METAFIELD_SPECS.length; i++) {
       const spec = VARIANT_METAFIELD_SPECS[i];
@@ -598,8 +608,6 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
         (spec.fallbackSource ? sourceRow?.[spec.fallbackSource] : undefined);
 
       if (isEmpty(rawVal)) continue;
-
-      // type is string -> pass-through as string
       outRow[colHeader] = toStr(rawVal);
     }
   }
@@ -667,12 +675,8 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
 
         const handle = toStr(rowObj.url_key).trim() ? slugify(rowObj.url_key) : slugify(rowObj.name || rowObj.sku);
 
-        // ===== PRICE RULES (as per your existing logic) =====
-        // Variant Price = special_price (as-is, no compare logic)
-        // Variant Compare At Price = msrp_price (as-is)
         const specialPrice = safeNumber(rowObj.special_price);
         const msrpPrice = safeNumber(rowObj.msrp_price);
-
         const qty = safeNumber(rowObj.qty);
 
         const out = makeEmptyRowObj(outputHeader);
@@ -683,11 +687,12 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
         out["Title"] = toStr(rowObj.name);
         out["Body HTML"] = toStr(rowObj.description || rowObj.short_description);
 
-        // Vendor = manufacturer
         out["Vendor"] = toStr(rowObj.manufacturer);
 
-        // ✅ (4) NEW: put simple/configurable into Shopify "Type" column
         out["Type"] = "simple";
+
+        // ✅ FIX (2): Gift Card FALSE by default
+        out["Gift Card"] = "FALSE";
 
         out["Status"] = getStatus(rowObj);
         out["Published"] = getPublished(rowObj);
@@ -715,7 +720,6 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
         out["Variant Inventory Qty"] = String(qty || 0);
         out["Inventory Available: Shop location"] = String(qty || 0);
 
-
         const w = safeNumber(rowObj.weight);
         if (w > 0) {
           out["Variant Weight"] = String(w);
@@ -728,8 +732,6 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
         out["Variant Taxable"] = "TRUE";
 
         attachProductMetafields(out, rowObj);
-
-        // ✅ NEW: variant metafield for simple products too (if column exists)
         attachVariantMetafields(out, rowObj);
 
         writeRow(out);
@@ -750,7 +752,7 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
         continue;
       }
 
-      // CHILD variant -> spool (works even if parent appears later)
+      // CHILD variant -> spool
       if (pt === "simple" && !isEmpty(parentSku)) {
         childCount++;
         spoolChildRow(parentSku, rowObj);
@@ -795,7 +797,6 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
 
       const specialPrice = safeNumber(parent.special_price);
       const msrpPrice = safeNumber(parent.msrp_price);
-
       const qty = safeNumber(parent.qty);
 
       const out = makeEmptyRowObj(outputHeader);
@@ -808,8 +809,10 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
 
       out["Vendor"] = toStr(parent.manufacturer);
 
-      // ✅ (4) NEW: product type
       out["Type"] = "configurable";
+
+      // ✅ FIX (2): Gift Card FALSE by default
+      out["Gift Card"] = "FALSE";
 
       out["Status"] = getStatus(parent);
       out["Published"] = getPublished(parent);
@@ -837,7 +840,6 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
       out["Variant Inventory Qty"] = String(qty || 0);
       out["Inventory Available: Shop location"] = String(qty || 0);
 
-
       const w = safeNumber(parent.weight);
       if (w > 0) {
         out["Variant Weight"] = String(w);
@@ -850,8 +852,6 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
       out["Variant Taxable"] = "TRUE";
 
       attachProductMetafields(out, parent);
-
-      // ✅ NEW: variant metafield (if present on parent row)
       attachVariantMetafields(out, parent);
 
       writeRow(out);
@@ -872,6 +872,11 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
 
       children.sort((a, b) => toStr(a.sku).localeCompare(toStr(b.sku)));
 
+      // ✅ FIX: keep Image Src populated for variant images too.
+      // ALSO ensure FIRST variant image is included (even when top row uses parent image).
+      const parentImg = pickFirstImage(parent, logs);
+      let nextImagePos = 0;
+
       for (let i = 0; i < children.length; i++) {
         const child = children[i];
         const childSku = toStr(child.sku).trim();
@@ -889,9 +894,8 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
           out["Body HTML"] = toStr(parent.description || parent.short_description);
 
           out["Vendor"] = toStr(parent.manufacturer);
-
-          // ✅ (4) NEW: product type (only on top row like other product fields)
           out["Type"] = "configurable";
+          out["Gift Card"] = "FALSE";
 
           out["Status"] = getStatus(parent);
           out["Published"] = getPublished(parent);
@@ -902,10 +906,11 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
           out["Metafield: title_tag [string]"] = toStr(parent.meta_title);
           out["Metafield: description_tag [string]"] = toStr(parent.meta_description);
 
-          const img = pickFirstImage(parent, logs);
-          if (img) {
-            out["Image Src"] = img;
-            out["Image Position"] = 1;
+          // parent image stays on top row (Image Position = 1)
+          if (parentImg) {
+            nextImagePos = 1;
+            out["Image Src"] = parentImg;
+            out["Image Position"] = nextImagePos;
           }
 
           attachProductMetafields(out, parent);
@@ -921,9 +926,22 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
         out["Variant Inventory Qty"] = String(qty || 0);
         out["Inventory Available: Shop location"] = String(qty || 0);
 
-
         const vImg = pickFirstImage(child, logs);
         if (vImg) out["Variant Image"] = vImg;
+
+        // Non-top variants: put variant image into Image Src on SAME row (existing behavior)
+        if (!isTop && vImg) {
+          nextImagePos = nextImagePos > 0 ? nextImagePos + 1 : 1;
+          out["Image Src"] = vImg;
+          out["Image Position"] = nextImagePos;
+        }
+
+        // If parent has NO image, allow top row to use first variant image (existing behavior)
+        if (isTop && isEmpty(out["Image Src"]) && vImg) {
+          nextImagePos = 1;
+          out["Image Src"] = vImg;
+          out["Image Position"] = nextImagePos;
+        }
 
         const w = safeNumber(child.weight);
         if (w > 0) {
@@ -953,15 +971,29 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
         out["Variant Requires Shipping"] = "TRUE";
         out["Variant Taxable"] = "TRUE";
 
-        // ✅ (3) NEW: variant metafield modal_number from CHILD row
         attachVariantMetafields(out, child);
 
+        // ✅ write variant row
         writeRow(out);
         rowNum++;
+
+        // ✅ NEW: If TOP variant has its own image AND parent image exists,
+        // add an extra IMAGE-ONLY row so Image Src list includes first variant image too.
+        if (isTop && parentImg && vImg && vImg !== parentImg) {
+          nextImagePos = nextImagePos > 0 ? nextImagePos + 1 : 1;
+
+          const imgOnly = makeEmptyRowObj(outputHeader);
+          imgOnly["Row #"] = rowNum;
+          imgOnly["Handle"] = handle;
+          imgOnly["Image Src"] = vImg;
+          imgOnly["Image Position"] = nextImagePos;
+
+          writeRow(imgOnly);
+          rowNum++;
+        }
       }
     }
 
-    // FIX #1: safe unlink with retry (Windows EBUSY)
     await safeUnlink(childPath, logs);
   }
 
@@ -984,7 +1016,6 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
 
   fs.writeFileSync(logPath, logs.join("\n"), "utf8");
 
-  // FIX #2: cleanup spool directory (parents + any leftovers)
   safeRmdirRecursive(spoolDir, logs);
 
   console.log("========== STREAM CONVERSION COMPLETE ==========");
