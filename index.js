@@ -12,6 +12,7 @@ import { syncBlogsAndArticles } from './blogSync.js';
 import { migrateFiles } from './fileupload.js';
 import { syncPagesFromSheet } from './pagesSync.js';
 import { convertToShopifySheet } from './shpoifySheetFormat.js';
+import { migrateDiscounts } from './discountSync.js';
 const upload = multer();
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -45,6 +46,7 @@ app.use("/smart-collection", upload.single("file"), migrateSmartCollections);
 app.use("/blogs", upload.single("file"), syncBlogsAndArticles);
 app.use("/pages", upload.single("file"), syncPagesFromSheet);
 app.use("/parseSheet", upload.single("file"), convertToShopifySheet);
+app.use("/discounts", upload.single("file"), migrateDiscounts);
 
 // Start server
 app.listen(PORT, () => {

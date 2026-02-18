@@ -24,27 +24,27 @@ const MAX_VARIANT_METAFIELDS = 180;
  * We will append product metafield columns + (NOW) variant metafield columns.
  */
 const SHOPIFY_COLUMNS = [
-  "ID","Handle","Command","Title","Body HTML","Vendor","Type","Tags","Tags Command",
-  "Created At","Updated At","Status","Published","Published At","Published Scope",
-  "Template Suffix","Gift Card","URL","Total Inventory Qty","Row #","Top Row",
-  "Category: ID","Category: Name","Category","Custom Collections","Smart Collections",
-  "Image Type","Image Src","Image Command","Image Position","Image Width","Image Height","Image Alt Text",
-  "Variant Inventory Item ID","Variant ID","Variant Command",
-  "Option1 Name","Option1 Value","Option2 Name","Option2 Value","Option3 Name","Option3 Value",
-  "Variant Position","Variant SKU","Variant Barcode","Variant Image","Variant Weight","Variant Weight Unit",
-  "Variant Price","Variant Compare At Price","Variant Taxable","Variant Tax Code",
-  "Variant Inventory Tracker","Variant Inventory Policy","Variant Fulfillment Service",
-  "Variant Requires Shipping","Variant Shipping Profile","Variant Inventory Qty","Variant Inventory Adjust",
-  "Variant Cost","Variant HS Code","Variant Country of Origin","Variant Province of Origin",
-  "Inventory Available: Shop location","Inventory Available Adjust: Shop location",
-  "Inventory On Hand: Shop location","Inventory On Hand Adjust: Shop location",
-  "Inventory Committed: Shop location","Inventory Reserved: Shop location",
-  "Inventory Damaged: Shop location","Inventory Damaged Adjust: Shop location",
-  "Inventory Safety Stock: Shop location","Inventory Safety Stock Adjust: Shop location",
-  "Inventory Quality Control: Shop location","Inventory Quality Control Adjust: Shop location",
+  "ID", "Handle", "Command", "Title", "Body HTML", "Vendor", "Type", "Tags", "Tags Command",
+  "Created At", "Updated At", "Status", "Published", "Published At", "Published Scope",
+  "Template Suffix", "Gift Card", "URL", "Total Inventory Qty", "Row #", "Top Row",
+  "Category: ID", "Category: Name", "Category", "Custom Collections", "Smart Collections",
+  "Image Type", "Image Src", "Image Command", "Image Position", "Image Width", "Image Height", "Image Alt Text",
+  "Variant Inventory Item ID", "Variant ID", "Variant Command",
+  "Option1 Name", "Option1 Value", "Option2 Name", "Option2 Value", "Option3 Name", "Option3 Value",
+  "Variant Position", "Variant SKU", "Variant Barcode", "Variant Image", "Variant Weight", "Variant Weight Unit",
+  "Variant Price", "Variant Compare At Price", "Variant Taxable", "Variant Tax Code",
+  "Variant Inventory Tracker", "Variant Inventory Policy", "Variant Fulfillment Service",
+  "Variant Requires Shipping", "Variant Shipping Profile", "Variant Inventory Qty", "Variant Inventory Adjust",
+  "Variant Cost", "Variant HS Code", "Variant Country of Origin", "Variant Province of Origin",
+  "Inventory Available: Shop location", "Inventory Available Adjust: Shop location",
+  "Inventory On Hand: Shop location", "Inventory On Hand Adjust: Shop location",
+  "Inventory Committed: Shop location", "Inventory Reserved: Shop location",
+  "Inventory Damaged: Shop location", "Inventory Damaged Adjust: Shop location",
+  "Inventory Safety Stock: Shop location", "Inventory Safety Stock Adjust: Shop location",
+  "Inventory Quality Control: Shop location", "Inventory Quality Control Adjust: Shop location",
   "Inventory Incoming: Shop location",
-  "Included / test cat","Price / test cat","Compare At Price / test cat",
-  "Metafield: title_tag [string]","Metafield: description_tag [string]",
+  "Included / test cat", "Price / test cat", "Compare At Price / test cat",
+  "Metafield: title_tag [string]", "Metafield: description_tag [string]",
 ];
 
 /**
@@ -276,11 +276,33 @@ const PRODUCT_METAFIELD_SPECS = [
 /**
  * ✅ (3) Variant metafield specs
  */
-const VARIANT_METAFIELD_SPECS = [
-  { key: "modal_number", type: "single_line_text_field", source: "modal_number", fallbackSource: "model_number" },
-  { key: "price", type: "single_line_text_field", source: "price" },
-];
+// ✅ Variant metafields = (your existing variant fields) + (all product metafields copied onto variants)
+// Rule: values come from VARIANT row (child row). Skip "onlyForConfigurable" specs (product-only).
+const VARIANT_METAFIELD_SPECS = (() => {
+  const base = [
+    { key: "modal_number", type: "single_line_text_field", source: "modal_number", fallbackSource: "model_number" },
+    { key: "price", type: "single_line_text_field", source: "price" },
+  ];
 
+  // Copy ALL product metafields to variants as well (so variant rows can carry filter_material, etc.)
+  for (const pm of PRODUCT_METAFIELD_SPECS) {
+    if (pm?.onlyForConfigurable) continue; // keep product-only metafields product-only
+    base.push({
+      key: pm.key,
+      type: pm.type,
+      source: pm.source,
+    });
+  }
+
+  // De-dupe (same key+type repeated)
+  const seen = new Set();
+  return base.filter((s) => {
+    const k = `${s.key}__${s.type}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+})();
 /** ---------- HELPERS ---------- **/
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
@@ -361,22 +383,62 @@ function parseConfigurableVariations(str) {
   if (isEmpty(str)) return map;
 
   const parts = String(str).split("|").map((x) => x.trim()).filter(Boolean);
+
   for (const part of parts) {
-    const pairs = part.split(",").map((x) => x.trim()).filter(Boolean);
-    let sku = "";
+    // Find sku first
+    const skuMatch = part.match(/(?:^|,)sku=([^,|]+)/);
+    const sku = skuMatch ? skuMatch[1].trim() : "";
+    if (!sku) continue;
+
+    // Remove the sku=... segment so we can parse the rest
+    let rest = part.replace(/(?:^|,)sku=[^,|]+/, "");
+
+    // Parse key=value pairs where value may contain commas
     const attrs = {};
-    for (const p of pairs) {
-      const idx = p.indexOf("=");
-      if (idx === -1) continue;
-      const k = p.slice(0, idx).trim();
-      const v = p.slice(idx + 1).trim();
-      if (k === "sku") sku = v;
-      else attrs[k] = v;
+    let i = 0;
+
+    while (i < rest.length) {
+      // skip leading commas/spaces
+      while (i < rest.length && (rest[i] === "," || rest[i] === " ")) i++;
+      if (i >= rest.length) break;
+
+      // read key up to '='
+      const eq = rest.indexOf("=", i);
+      if (eq === -1) break;
+
+      const key = rest.slice(i, eq).trim();
+      i = eq + 1;
+
+      // read value until we hit ",<nextKey>=" pattern
+      // nextKey: letters/numbers/underscore
+      let next = i;
+      while (next < rest.length) {
+        if (rest[next] === ",") {
+          const maybeKeyStart = next + 1;
+          // look ahead for pattern ",something="
+          const lookEq = rest.indexOf("=", maybeKeyStart);
+          if (lookEq !== -1) {
+            const candidateKey = rest.slice(maybeKeyStart, lookEq).trim();
+            if (candidateKey && /^[a-zA-Z0-9_]+$/.test(candidateKey)) {
+              break; // this comma starts a new key=value
+            }
+          }
+        }
+        next++;
+      }
+
+      const value = rest.slice(i, next).trim();
+      if (key) attrs[key] = value;
+
+      i = next; // continue after value (comma will be skipped at loop start)
     }
-    if (sku) map.set(sku, attrs);
+
+    map.set(sku, attrs);
   }
+
   return map;
 }
+
 
 function parseConfigurableLabels(str) {
   const out = [];
@@ -628,6 +690,20 @@ async function convertBufferToShopifyXlsxStreaming(buffer) {
         (spec.fallbackSource ? sourceRow?.[spec.fallbackSource] : undefined);
 
       if (isEmpty(rawVal)) continue;
+
+      // ✅ Support same formatting rules as product metafields
+      if (spec.type === "boolean") {
+        const b = normalizeBoolean(rawVal);
+        if (b) outRow[colHeader] = b;
+        continue;
+      }
+
+      if (spec.type === "list.single_line_text_field") {
+        const listVal = normalizeListSingleLineText(rawVal);
+        if (listVal) outRow[colHeader] = listVal;
+        continue;
+      }
+
       outRow[colHeader] = toStr(rawVal);
     }
   }
