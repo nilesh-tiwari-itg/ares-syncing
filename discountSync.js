@@ -126,6 +126,22 @@ query codeDiscountNodeByCode($code: String!) {
 }
 `;
 
+const AUTOMATIC_DISCOUNT_NODES_BY_TITLE = `
+query automaticDiscountNodesByTitle($query: String!) {
+  automaticDiscountNodes(first: 5, query: $query) {
+    nodes {
+      id
+      automaticDiscount {
+        ... on DiscountAutomaticApp { title }
+        ... on DiscountAutomaticBasic { title }
+        ... on DiscountAutomaticBxgy { title }
+        ... on DiscountAutomaticFreeShipping { title }
+      }
+    }
+  }
+}
+`;
+
 const PRODUCTS_BY_QUERY = `
 query productsByQuery($q: String!) {
   products(first: 1, query: $q) {
@@ -155,6 +171,14 @@ const SEGMENTS_BY_QUERY = `
 query segmentsByQuery($q: String!) {
   segments(first: 1, query: $q) {
     nodes { id name }
+  }
+}
+`;
+
+const CUSTOMERS_BY_QUERY = `
+query customersByQuery($q: String!) {
+  customers(first: 1, query: $q) {
+    nodes { id email }
   }
 }
 `;
@@ -389,6 +413,29 @@ async function findExistingCodeDiscountNodeId(code) {
 }
 
 /**
+ * Existence check (automatic discounts by title)
+ * Shopify does not have a direct "find by title" query for automatic discounts,
+ * so we use automaticDiscountNodes with a title search and then do an exact match.
+ */
+async function findExistingAutomaticDiscountNodeId(title) {
+  if (isEmpty(title)) return null;
+
+  const t = String(title).trim();
+
+  const data = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    AUTOMATIC_DISCOUNT_NODES_BY_TITLE,
+    { query: `title:${JSON.stringify(t)}` },
+    "automaticDiscountNodesByTitle"
+  );
+
+  const nodes = data?.automaticDiscountNodes?.nodes || [];
+  const match = nodes.find((n) => n.automaticDiscount?.title === t);
+  return match?.id || null;
+}
+
+/**
  * Resolver cache
  */
 const CACHE = {
@@ -490,6 +537,30 @@ async function resolveSegmentIdByNameOrGid(nameOrGid) {
   return id;
 }
 
+async function resolveCustomerIdByEmailOrGid(emailOrGid) {
+  if (isEmpty(emailOrGid)) return null;
+  const v = String(emailOrGid).trim();
+
+  if (looksLikeGid(v)) return v;
+
+  // We don't verify emails via cache to keep it simple, but we could.
+  // Query by email: "email:foo@bar.com"
+  const q = `email:${JSON.stringify(v)}`.replace(/"/g, "");
+  const data = await graphqlRequest(
+    TARGET_GQL,
+    TARGET_ACCESS_TOKEN,
+    CUSTOMERS_BY_QUERY,
+    { q },
+    "customersByEmail"
+  );
+
+  const id = data?.customers?.nodes?.[0]?.id || null;
+  if (!id) {
+    console.warn(`⚠️ Customer not found for email: "${v}"`);
+  }
+  return id;
+}
+
 /**
  * ✅ CRITICAL FIX: context.all is enum DiscountBuyerSelection = "ALL"
  * Sheet columns:
@@ -516,8 +587,24 @@ async function buildContextFromSheet(row) {
   }
 
   if (type.includes("customer")) {
-    const ids = values.filter(looksLikeGid);
-    return ids.length ? { customers: { add: ids } } : { all: "ALL" };
+    const ids = [];
+    for (const v of values) {
+      const id = await resolveCustomerIdByEmailOrGid(v);
+      if (id) {
+        ids.push(id);
+      } else {
+        console.log(`Skipping customer "${v}" (not found on Shopify).`);
+      }
+      await delay(80); // throttle slightly
+    }
+
+    if (ids.length === 0) {
+      // User requested: "if customer not found leave that discount"
+      // Turning this into a hard stop so we don't accidentally create an ALL discount.
+      throw new Error(`No valid customer GIDs found for Eligibility: Customer Values. Cannot create specific customer discount.`);
+    }
+
+    return { customers: { add: ids } };
   }
 
   // Fallback
@@ -544,26 +631,38 @@ function buildCombinesWith(row) {
 
 /**
  * Purchase type (from sheet)
- * Column: Purchase Type (e.g. "One-Time Purchase")
+ * Column: Purchase Type (e.g. "One-Time Purchase" / "Subscription" / "Both")
+ *
+ * Maps to appliesOnOneTimePurchase + appliesOnSubscription on the Shopify input.
+ * Returns {} (empty) if blank — Shopify will use its defaults.
  */
 function buildPurchaseTypeFlags(row) {
-  const s = String(row["Purchase Type"] || "").trim().toLowerCase();
-  if (isEmpty(s)) return {};
+  const raw = String(row["Purchase Type"] || "").trim();
+  if (isEmpty(raw)) return {};
+  return { appliesOnOneTimePurchase: true, appliesOnSubscription: true };
 
-  if (s.includes("one-time")) {
-    return { appliesOnOneTimePurchase: true, appliesOnSubscription: false };
-  }
+  const s = raw.toLowerCase().replace(/\s+/g, " ");
 
-  if (s.includes("subscription")) {
-    return { appliesOnOneTimePurchase: false, appliesOnSubscription: true };
-  }
+  // Accept common variants from sheet/export
+  const hasOneTime = s.includes("one-time") || s.includes("one time");
+  const hasSub = s.includes("subscription");
 
-  if (s.includes("both")) {
+  if (s.includes("both") || (hasOneTime && hasSub)) {
     return { appliesOnOneTimePurchase: true, appliesOnSubscription: true };
   }
 
+  if (hasSub && !hasOneTime) {
+    return { appliesOnOneTimePurchase: false, appliesOnSubscription: true };
+  }
+
+  if (hasOneTime && !hasSub) {
+    return { appliesOnOneTimePurchase: true, appliesOnSubscription: false };
+  }
+
+  // Unknown value → don't send flags (Shopify defaults)
   return {};
 }
+
 
 /**
  * Minimum requirement (from sheet)
@@ -578,10 +677,18 @@ function buildMinimumRequirement(row) {
   const req = String(row["Minimum Requirement"] || "").trim().toLowerCase();
   if (isEmpty(req) || req === "none") return undefined;
 
-  if (req.includes("subtotal")) {
+  // "Amount" or "Subtotal" → minimum purchase subtotal
+  if (req.includes("amount") || req.includes("subtotal")) {
     const v = toMoneyString(row["Minimum Value"]);
     if (!v) return undefined;
     return { subtotal: { greaterThanOrEqualToSubtotal: v } };
+  }
+
+  // "Quantity" → minimum quantity of items
+  if (req.includes("quantity")) {
+    const v = toIntOrNull(row["Minimum Value"]);
+    if (v === null) return undefined;
+    return { quantity: { greaterThanOrEqualToQuantity: String(v) } };
   }
 
   return undefined;
@@ -607,14 +714,25 @@ function buildUsageFields(row) {
   if (usageLimit !== null && usageLimit > 0) out.usageLimit = usageLimit;
   if (appliesOncePerCustomer !== null) out.appliesOncePerCustomer = appliesOncePerCustomer;
 
+  // NOTE: usesPerOrderLimit is stored separately — it is NOT valid on all input types.
+  // DiscountCodeBasicInput does NOT have usesPerOrderLimit.
+  // Only DiscountCodeBxgyInput and DiscountAutomaticBxgyInput support it.
+  // Callers that need it should read out.usesPerOrderLimit explicitly.
   if (usesPerOrderLimit !== null && usesPerOrderLimit > 0) {
-    // Shopify uses UnsignedInt64 in inputs; JSON number is ok, but we keep string to be safe.
     out.usesPerOrderLimit = String(usesPerOrderLimit);
   }
 
-  // recurring subscription limit (sheet)
-  const recurring = toIntOrNull(row["Purchase Type: Recurring Subscription Limit"]);
-  if (recurring !== null && recurring > 0) out.recurringCycleLimit = recurring;
+  // recurringCycleLimit is ONLY meaningful for subscription-based discounts.
+  // If Purchase Type is "One-Time Purchase" (or blank), we must NOT send this field —
+  // sending it would override the purchase type and break one-time purchase discounts.
+  const pt = String(row["Purchase Type"] || "").trim().toLowerCase().replace(/\s+/g, " ");
+  const isSubscriptionBased = pt.includes("subscription") || pt.includes("both");
+
+
+  if (isSubscriptionBased) {
+    const recurring = toIntOrNull(row["Purchase Type: Recurring Subscription Limit"]);
+    if (recurring !== null && recurring > 0) out.recurringCycleLimit = recurring;
+  }
 
   return out;
 }
@@ -875,12 +993,18 @@ function buildFreeShippingDestination(row) {
   return { countries: { add: codes } };
 }
 
+/**
+ * "Free Shipping: Over Amount" in Matrixify = maximumShippingPrice in Shopify.
+ * It means: only apply free shipping to rates that cost <= this amount.
+ * This is NOT the minimum purchase requirement — it's a separate field.
+ */
+function buildMaximumShippingPrice(row) {
+  return toMoneyString(row["Free Shipping: Over Amount"]) || null;
+}
+
 function buildFreeShippingMinimum(row) {
-  // Prefer Free Shipping: Over Amount (sheet) if present; else fallback to Minimum Requirement/Value
-  const over = toMoneyString(row["Free Shipping: Over Amount"]);
-  if (over) {
-    return { subtotal: { greaterThanOrEqualToSubtotal: over } };
-  }
+  // Minimum purchase requirement comes from Minimum Requirement + Minimum Value columns.
+  // "Free Shipping: Over Amount" is maximumShippingPrice (a different field), NOT this.
   return buildMinimumRequirement(row);
 }
 
@@ -917,6 +1041,10 @@ async function buildDiscountInputFromRow(row) {
 
       const items = await buildItemsForBasic(row);
 
+      // DiscountCodeBasicInput fields:
+      // appliesOncePerCustomer, code, combinesWith, context, customerGets,
+      // endsAt, minimumRequirement, recurringCycleLimit, startsAt, title, usageLimit
+      // NOTE: usesPerOrderLimit is NOT a field on DiscountCodeBasicInput — omit it.
       const input = {
         title,
         code,
@@ -930,7 +1058,9 @@ async function buildDiscountInputFromRow(row) {
         },
         ...(minReq ? { minimumRequirement: minReq } : {}),
         ...(combinesWith ? { combinesWith } : {}),
-        ...usageFields,
+        ...(usageFields.usageLimit ? { usageLimit: usageFields.usageLimit } : {}),
+        ...(usageFields.appliesOncePerCustomer !== undefined ? { appliesOncePerCustomer: usageFields.appliesOncePerCustomer } : {}),
+        ...(usageFields.recurringCycleLimit ? { recurringCycleLimit: usageFields.recurringCycleLimit } : {}),
       };
 
       return { mutation: "discountCodeBasicCreate", variables: { basicCodeDiscount: input } };
@@ -968,9 +1098,13 @@ async function buildDiscountInputFromRow(row) {
       }
 
       const destination = buildFreeShippingDestination(row);
-      const freeMin = buildFreeShippingMinimum(row);
+      const freeMin = buildFreeShippingMinimum(row);         // minimum purchase subtotal/quantity
+      const maxShippingPrice = buildMaximumShippingPrice(row); // exclude rates over this amount
 
-      // For free shipping code, the input supports destination + minimumRequirement (as in your sample).
+      // DiscountCodeFreeShippingInput fields:
+      // appliesOncePerCustomer, appliesOnOneTimePurchase, appliesOnSubscription,
+      // code, combinesWith, context, destination, endsAt, maximumShippingPrice,
+      // minimumRequirement, recurringCycleLimit, startsAt, title, usageLimit
       const input = {
         title,
         code,
@@ -979,14 +1113,12 @@ async function buildDiscountInputFromRow(row) {
         context,
         destination,
         ...(freeMin ? { minimumRequirement: freeMin } : {}),
-        ...(combinesWith ? { combinesWith: {
-          // Free shipping combinesWith typically only uses orderDiscounts/productDiscounts.
-          // If shippingDiscounts is present in sheet, Shopify may still accept it, but keeping it strict:
-          orderDiscounts: combinesWith.orderDiscounts ?? false,
-          productDiscounts: combinesWith.productDiscounts ?? false,
-        }} : {}),
+        ...(maxShippingPrice ? { maximumShippingPrice: maxShippingPrice } : {}),
+        ...(combinesWith ? { combinesWith } : {}),
         ...purchaseFlags,
-        ...usageFields,
+        ...(usageFields.usageLimit ? { usageLimit: usageFields.usageLimit } : {}),
+        ...(usageFields.appliesOncePerCustomer !== undefined ? { appliesOncePerCustomer: usageFields.appliesOncePerCustomer } : {}),
+        ...(usageFields.recurringCycleLimit ? { recurringCycleLimit: usageFields.recurringCycleLimit } : {}),
       };
 
       return { mutation: "discountCodeFreeShippingCreate", variables: { freeShippingCodeDiscount: input } };
@@ -1035,6 +1167,18 @@ async function buildDiscountInputFromRow(row) {
       const customerBuys = await buildBxgyCustomerBuys(row);
       const customerGets = await buildBxgyCustomerGets(row);
 
+      // ⚠️ Shopify's DiscountAutomaticBxgyInput does NOT support appliesOnOneTimePurchase
+      // or appliesOnSubscription at runtime (server rejects them even though the schema
+      // lists them on DiscountCustomerGetsInput). These fields are only valid for
+      // Basic and Code-based discounts. We intentionally drop them here.
+      if (purchaseFlags && Object.keys(purchaseFlags).length > 0) {
+        console.warn(
+          `⚠️  [${title}] Purchase Type ("${row["Purchase Type"]}") is set but ` +
+          `Shopify does NOT support appliesOnOneTimePurchase / appliesOnSubscription ` +
+          `for Automatic BXGY discounts. These fields will be ignored.`
+        );
+      }
+
       const input = {
         title,
         startsAt,
@@ -1042,8 +1186,8 @@ async function buildDiscountInputFromRow(row) {
         context,
         customerBuys,
         customerGets: {
+          // purchaseFlags intentionally excluded — not supported by Shopify for Automatic BXGY
           ...customerGets,
-          ...purchaseFlags,
         },
         ...(combinesWith ? { combinesWith } : {}),
         ...(usageFields.usesPerOrderLimit ? { usesPerOrderLimit: usageFields.usesPerOrderLimit } : {}),
@@ -1059,8 +1203,13 @@ async function buildDiscountInputFromRow(row) {
       }
 
       const destination = buildFreeShippingDestination(row);
-      const freeMin = buildFreeShippingMinimum(row);
+      const freeMin = buildFreeShippingMinimum(row);         // minimum purchase subtotal/quantity
+      const maxShippingPrice = buildMaximumShippingPrice(row); // exclude rates over this amount
 
+      // DiscountAutomaticFreeShippingInput fields:
+      // appliesOnOneTimePurchase, appliesOnSubscription, combinesWith, context,
+      // destination, endsAt, maximumShippingPrice, minimumRequirement,
+      // recurringCycleLimit, startsAt, title
       const input = {
         title,
         startsAt,
@@ -1068,12 +1217,8 @@ async function buildDiscountInputFromRow(row) {
         context,
         destination,
         ...(freeMin ? { minimumRequirement: freeMin } : {}),
-        ...(combinesWith ? {
-          combinesWith: {
-            orderDiscounts: combinesWith.orderDiscounts ?? false,
-            productDiscounts: combinesWith.productDiscounts ?? false,
-          },
-        } : {}),
+        ...(maxShippingPrice ? { maximumShippingPrice: maxShippingPrice } : {}),
+        ...(combinesWith ? { combinesWith } : {}),
         ...purchaseFlags,
         ...(usageFields.recurringCycleLimit ? { recurringCycleLimit: usageFields.recurringCycleLimit } : {}),
       };
@@ -1167,9 +1312,9 @@ function extractCreatedId(mutationName, data) {
 /**
  * MAIN
  */
-export async function migrateDiscounts(req,res) {
-    const fileBuffer = req.file?.buffer;
-    const settings={}
+export async function migrateDiscounts(req, res) {
+  const fileBuffer = req.file?.buffer;
+  const settings = {}
   if (!fileBuffer) return { ok: false, error: "Missing file (req.file.buffer)" };
 
   console.log("🚀 Starting Discounts import (Sheet → Shopify) [CREATE ONLY] ...");
@@ -1225,22 +1370,22 @@ export async function migrateDiscounts(req,res) {
       }
 
       // Skip if sheet already has an ID (means it already exists)
-    //   if (!isEmpty(row["ID"])) {
-    //     console.log(`🟡 Skipping: Sheet has ID=${row["ID"]} (update later)`);
-    //     skippedCount++;
+      //   if (!isEmpty(row["ID"])) {
+      //     console.log(`🟡 Skipping: Sheet has ID=${row["ID"]} (update later)`);
+      //     skippedCount++;
 
-    //     reportRows.push({
-    //       ...baseReportRow,
-    //       Status: "SUCCESS",
-    //       Reason: `Skipped: existing discount (sheet has ID=${row["ID"]})`,
-    //       NewDiscountId: String(row["ID"]),
-    //       "Mutation Used": "",
-    //       Retry: "false",
-    //       "Retry Status": "",
-    //     });
-    //     flushReportToDisk();
-    //     continue;
-    //   }
+      //     reportRows.push({
+      //       ...baseReportRow,
+      //       Status: "SUCCESS",
+      //       Reason: `Skipped: existing discount (sheet has ID=${row["ID"]})`,
+      //       NewDiscountId: String(row["ID"]),
+      //       "Mutation Used": "",
+      //       Retry: "false",
+      //       "Retry Status": "",
+      //     });
+      //     flushReportToDisk();
+      //     continue;
+      //   }
 
       // If code discount, check existence by code
       const method = normalizeSheetMethod(row["Method"]);
@@ -1254,6 +1399,27 @@ export async function migrateDiscounts(req,res) {
             ...baseReportRow,
             Status: "SUCCESS",
             Reason: `Skipped: code already exists (id=${existing})`,
+            NewDiscountId: existing,
+            "Mutation Used": "",
+            Retry: "false",
+            "Retry Status": "",
+          });
+          flushReportToDisk();
+          continue;
+        }
+      }
+
+      // If automatic discount, check existence by title
+      if (method === "Automatic" && !isEmpty(row["Title"])) {
+        const existing = await findExistingAutomaticDiscountNodeId(row["Title"]);
+        if (existing) {
+          console.log(`🟡 Skipping: Automatic discount title already exists → ${existing} (update later)`);
+          skippedCount++;
+
+          reportRows.push({
+            ...baseReportRow,
+            Status: "SUCCESS",
+            Reason: `Skipped: automatic discount title already exists (id=${existing})`,
             NewDiscountId: existing,
             "Mutation Used": "",
             Retry: "false",
