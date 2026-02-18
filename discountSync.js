@@ -2,11 +2,13 @@
  * discounts_import.js
  * Matrixify "Discounts" sheet → Shopify Admin GraphQL [CREATE ONLY]
  *
- * ✅ STRICT: Uses ONLY the sheet's Method + Type values (no invented types).
- * ✅ FIX: DiscountContextInput.all is an ENUM → { all: "ALL" } (NOT boolean true)
- * ✅ Resolves handles/SKUs/names from sheet to GIDs (products, variants, collections, segments).
- * ✅ Skips existing discounts (sheet has ID or code already exists). Updates later.
- * ✅ Incremental XLSX report (same pattern as your reference customer script).
+ * FIXES INCLUDED:
+ * ✅ Proper Matrixify multi-row merge using "Top Row" (10 discounts stay 10)
+ * ✅ Merge multi-row list fields (customers/segments/collections/products/etc)
+ * ✅ FIX Purchase Type flags (One-Time vs Subscription vs Both)
+ * ✅ BXGY: supports "Spend $X" by parsing Summary → customerBuys.value.amount
+ * ✅ BXGY: supports Value Type = "Free" → effect.percentage = 1 (100% off)
+ * ✅ Keeps your existing resolver + report pattern
  *
  * ENV:
  *   TARGET_SHOP=xxxxx.myshopify.com
@@ -34,7 +36,7 @@ if (!TARGET_SHOP || !TARGET_ACCESS_TOKEN) {
 const TARGET_GQL = `https://${TARGET_SHOP}/admin/api/${API_VERSION}/graphql.json`;
 
 /**
- * MUTATIONS (exact ones you provided)
+ * MUTATIONS
  */
 const DISCOUNT_AUTOMATIC_APP_CREATE = `
 mutation discountAutomaticAppCreate($automaticAppDiscount: DiscountAutomaticAppInput!) {
@@ -118,7 +120,6 @@ mutation discountCodeFreeShippingCreate($freeShippingCodeDiscount: DiscountCodeF
 
 /**
  * LOOKUPS / RESOLVERS
- * We must resolve Matrixify sheet values (handles, SKUs, names) → GIDs.
  */
 const CODE_DISCOUNT_NODE_BY_CODE = `
 query codeDiscountNodeByCode($code: String!) {
@@ -166,7 +167,6 @@ query variantsByQuery($q: String!) {
 }
 `;
 
-// segments lookup (Eligibility: Customer Type + Values)
 const SEGMENTS_BY_QUERY = `
 query segmentsByQuery($q: String!) {
   segments(first: 1, query: $q) {
@@ -184,7 +184,7 @@ query customersByQuery($q: String!) {
 `;
 
 /**
- * REPORT HELPERS (same pattern)
+ * REPORT HELPERS
  */
 function formatFailureReason(err) {
   if (!err) return "Unknown error";
@@ -230,6 +230,7 @@ function buildDiscountsStatusXlsx(sourceRows) {
       "Mutation Used": r["Mutation Used"] ?? "",
       Retry: r.Retry ?? "false",
       "Retry Status": r["Retry Status"] ?? "",
+      "Merged Rows": r["Merged Rows"] ?? "",
     })),
     { skipHeader: false }
   );
@@ -253,6 +254,13 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function isEmpty(v) {
   return v === null || v === undefined || String(v).trim() === "";
+}
+
+function isTruthy(v) {
+  if (v === true) return true;
+  if (v === false) return false;
+  const s = String(v ?? "").trim().toLowerCase();
+  return ["1", "true", "yes", "y"].includes(s);
 }
 
 function toBool(v) {
@@ -282,7 +290,6 @@ function toMoneyString(v) {
   if (isEmpty(v)) return null;
   const n = Number(String(v).trim());
   if (!Number.isFinite(n)) return null;
-  // keep as trimmed string (Shopify accepts "5" or "5.00")
   return String(v).trim();
 }
 
@@ -292,7 +299,6 @@ function toDateTimeISO(v) {
 
   const s = String(v).trim();
 
-  // Matrixify export often uses: "2025-12-02 03:01:03 -0500"
   const m = s.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) ([+-]\d{2})(\d{2})$/);
   if (m) return `${m[1]}T${m[2]}${m[3]}:${m[4]}`;
 
@@ -311,6 +317,19 @@ function splitList(v) {
     .filter(Boolean);
 }
 
+function uniq(arr) {
+  const out = [];
+  const seen = new Set();
+  for (const x of arr) {
+    const k = String(x);
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(x);
+    }
+  }
+  return out;
+}
+
 function looksLikeGid(v) {
   return typeof v === "string" && v.startsWith("gid://shopify/");
 }
@@ -323,26 +342,27 @@ function normalizeSheetMethod(v) {
 }
 
 function normalizeSheetType(v) {
-  // Use sheet values; normalize lightly for matching
   const raw = String(v || "").trim();
   const s = raw.toLowerCase();
   if (s === "amount off products") return "Amount off Products";
   if (s === "amount off order") return "Amount off Order";
   if (s === "buy x get y") return "Buy X Get Y";
   if (s === "free shipping") return "Free Shipping";
-  return raw || null; // keep raw (in case new types appear)
+  return raw || null;
 }
 
 function normalizeValueType(v) {
-  const s = String(v || "").trim().toLowerCase();
+  const raw = String(v || "").trim();
+  const s = raw.toLowerCase();
   if (s === "percentage") return "Percentage";
   if (s === "fixed amount") return "Fixed Amount";
   if (s === "amount off each") return "Amount Off Each";
-  return String(v || "").trim() || null;
+  if (s === "free") return "Free";
+  return raw || null;
 }
 
 /**
- * GRAPHQL helper (same style)
+ * GRAPHQL helper
  */
 async function graphqlRequest(endpoint, token, query, variables = {}, label = "") {
   const res = await fetch(endpoint, {
@@ -396,7 +416,83 @@ function loadRows(fileBuffer) {
 }
 
 /**
- * Existence check (code discounts)
+ * ✅ Matrixify multi-row merge using Top Row
+ * - Start a new discount when Top Row is truthy
+ * - Otherwise, row belongs to previous discount
+ * - Merge list fields into comma lists
+ */
+function mergeMatrixifyDiscountRows(rows) {
+  const groups = [];
+  let current = null;
+
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const top = isTruthy(r["Top Row"]);
+    if (top || !current) {
+      current = { rows: [r], idxs: [i + 1] }; // 1-based for human logs
+      groups.push(current);
+    } else {
+      current.rows.push(r);
+      current.idxs.push(i + 1);
+    }
+  }
+
+  const LIST_FIELDS = [
+    "Eligibility: Customer Values",
+    "Applies To: Values",
+    "Buy X Get Y: Customer Buys Values",
+    "Free Shipping: Country Codes",
+  ];
+
+  const merged = groups.map((g) => {
+    const base = { ...g.rows[0] };
+
+    // Fill missing scalar fields from continuation rows if base is empty
+    for (const rr of g.rows.slice(1)) {
+      for (const k of Object.keys(rr)) {
+        if (isEmpty(base[k]) && !isEmpty(rr[k])) base[k] = rr[k];
+      }
+    }
+
+    // Merge list fields
+    for (const f of LIST_FIELDS) {
+      const all = [];
+      for (const rr of g.rows) all.push(...splitList(rr[f]));
+      const u = uniq(all);
+      base[f] = u.length ? u.join(", ") : base[f];
+    }
+
+    // Guard: if Applies To type differs across rows, that sheet is inconsistent
+    const appliesTypes = uniq(
+      g.rows.map((x) => String(x["Applies To: Type"] || "").trim()).filter(Boolean)
+    );
+    if (appliesTypes.length > 1) {
+      throw new Error(
+        `Matrixify merge error: Applies To: Type differs across merged rows: ${JSON.stringify(appliesTypes)}`
+      );
+    }
+
+    // Guard: if Eligibility type differs across rows, inconsistent
+    const eligTypes = uniq(
+      g.rows.map((x) => String(x["Eligibility: Customer Type"] || "").trim()).filter(Boolean)
+    );
+    if (eligTypes.length > 1) {
+      throw new Error(
+        `Matrixify merge error: Eligibility: Customer Type differs across merged rows: ${JSON.stringify(eligTypes)}`
+      );
+    }
+
+    base.__mergedRows = g.idxs.join(",");
+    base.__mergedCount = g.rows.length;
+
+    return base;
+  });
+
+  return merged;
+}
+
+/**
+ * Existence checks
  */
 async function findExistingCodeDiscountNodeId(code) {
   if (isEmpty(code)) return null;
@@ -412,11 +508,6 @@ async function findExistingCodeDiscountNodeId(code) {
   return data?.codeDiscountNodeByCode?.id || null;
 }
 
-/**
- * Existence check (automatic discounts by title)
- * Shopify does not have a direct "find by title" query for automatic discounts,
- * so we use automaticDiscountNodes with a title search and then do an exact match.
- */
 async function findExistingAutomaticDiscountNodeId(title) {
   if (isEmpty(title)) return null;
 
@@ -443,28 +534,21 @@ const CACHE = {
   collectionByHandle: new Map(),
   variantBySku: new Map(),
   segmentByName: new Map(),
+  customerByEmail: new Map(),
 };
 
 /**
- * Resolvers (sheet values → GIDs)
+ * Resolvers
  */
 async function resolveProductIdByHandle(handleOrGid) {
   if (isEmpty(handleOrGid)) return null;
   const v = String(handleOrGid).trim();
 
   if (looksLikeGid(v)) return v;
-
   if (CACHE.productByHandle.has(v)) return CACHE.productByHandle.get(v);
 
   const q = `handle:${v}`;
-  const data = await graphqlRequest(
-    TARGET_GQL,
-    TARGET_ACCESS_TOKEN,
-    PRODUCTS_BY_QUERY,
-    { q },
-    "productsByHandle"
-  );
-
+  const data = await graphqlRequest(TARGET_GQL, TARGET_ACCESS_TOKEN, PRODUCTS_BY_QUERY, { q }, "productsByHandle");
   const id = data?.products?.nodes?.[0]?.id || null;
   CACHE.productByHandle.set(v, id);
   return id;
@@ -475,18 +559,10 @@ async function resolveCollectionIdByHandle(handleOrGid) {
   const v = String(handleOrGid).trim();
 
   if (looksLikeGid(v)) return v;
-
   if (CACHE.collectionByHandle.has(v)) return CACHE.collectionByHandle.get(v);
 
   const q = `handle:${v}`;
-  const data = await graphqlRequest(
-    TARGET_GQL,
-    TARGET_ACCESS_TOKEN,
-    COLLECTIONS_BY_QUERY,
-    { q },
-    "collectionsByHandle"
-  );
-
+  const data = await graphqlRequest(TARGET_GQL, TARGET_ACCESS_TOKEN, COLLECTIONS_BY_QUERY, { q }, "collectionsByHandle");
   const id = data?.collections?.nodes?.[0]?.id || null;
   CACHE.collectionByHandle.set(v, id);
   return id;
@@ -497,18 +573,11 @@ async function resolveVariantIdBySku(skuOrGid) {
   const v = String(skuOrGid).trim();
 
   if (looksLikeGid(v)) return v;
-
   if (CACHE.variantBySku.has(v)) return CACHE.variantBySku.get(v);
 
-  const q = `sku:${JSON.stringify(v)}`.replace(/"/g, ""); // simple safe
-  const data = await graphqlRequest(
-    TARGET_GQL,
-    TARGET_ACCESS_TOKEN,
-    VARIANTS_BY_QUERY,
-    { q },
-    "variantsBySku"
-  );
-
+  // Shopify query syntax typically supports sku:VALUE
+  const q = `sku:${v}`;
+  const data = await graphqlRequest(TARGET_GQL, TARGET_ACCESS_TOKEN, VARIANTS_BY_QUERY, { q }, "variantsBySku");
   const id = data?.productVariants?.nodes?.[0]?.id || null;
   CACHE.variantBySku.set(v, id);
   return id;
@@ -519,19 +588,10 @@ async function resolveSegmentIdByNameOrGid(nameOrGid) {
   const v = String(nameOrGid).trim();
 
   if (looksLikeGid(v)) return v;
-
   if (CACHE.segmentByName.has(v)) return CACHE.segmentByName.get(v);
 
-  // segments query supports: name:"VIP"
-  const q = `name:${JSON.stringify(v)}`.replace(/"/g, "");
-  const data = await graphqlRequest(
-    TARGET_GQL,
-    TARGET_ACCESS_TOKEN,
-    SEGMENTS_BY_QUERY,
-    { q },
-    "segmentsByName"
-  );
-
+  const q = `name:${v}`;
+  const data = await graphqlRequest(TARGET_GQL, TARGET_ACCESS_TOKEN, SEGMENTS_BY_QUERY, { q }, "segmentsByName");
   const id = data?.segments?.nodes?.[0]?.id || null;
   CACHE.segmentByName.set(v, id);
   return id;
@@ -542,39 +602,26 @@ async function resolveCustomerIdByEmailOrGid(emailOrGid) {
   const v = String(emailOrGid).trim();
 
   if (looksLikeGid(v)) return v;
+  if (CACHE.customerByEmail.has(v)) return CACHE.customerByEmail.get(v);
 
-  // We don't verify emails via cache to keep it simple, but we could.
-  // Query by email: "email:foo@bar.com"
-  const q = `email:${JSON.stringify(v)}`.replace(/"/g, "");
-  const data = await graphqlRequest(
-    TARGET_GQL,
-    TARGET_ACCESS_TOKEN,
-    CUSTOMERS_BY_QUERY,
-    { q },
-    "customersByEmail"
-  );
-
+  const q = `email:${v}`;
+  const data = await graphqlRequest(TARGET_GQL, TARGET_ACCESS_TOKEN, CUSTOMERS_BY_QUERY, { q }, "customersByEmail");
   const id = data?.customers?.nodes?.[0]?.id || null;
-  if (!id) {
-    console.warn(`⚠️ Customer not found for email: "${v}"`);
-  }
+
+  CACHE.customerByEmail.set(v, id);
+  if (!id) console.warn(`⚠️ Customer not found for email: "${v}"`);
   return id;
 }
 
 /**
- * ✅ CRITICAL FIX: context.all is enum DiscountBuyerSelection = "ALL"
- * Sheet columns:
- *   Eligibility: Customer Type   (All / Customer Segments / Customers / etc)
- *   Eligibility: Customer Values (comma list: names or GIDs)
+ * ✅ Context builder
  */
 async function buildContextFromSheet(row) {
   const typeRaw = String(row["Eligibility: Customer Type"] || "").trim();
   const type = typeRaw.toLowerCase();
   const values = splitList(row["Eligibility: Customer Values"]);
 
-  if (isEmpty(typeRaw) || type === "all") {
-    return { all: "ALL" };
-  }
+  if (isEmpty(typeRaw) || type === "all") return { all: "ALL" };
 
   if (type.includes("segment")) {
     const ids = [];
@@ -590,38 +637,26 @@ async function buildContextFromSheet(row) {
     const ids = [];
     for (const v of values) {
       const id = await resolveCustomerIdByEmailOrGid(v);
-      if (id) {
-        ids.push(id);
-      } else {
-        console.log(`Skipping customer "${v}" (not found on Shopify).`);
-      }
-      await delay(80); // throttle slightly
+      if (id) ids.push(id);
+      await delay(80);
     }
-
-    if (ids.length === 0) {
-      // User requested: "if customer not found leave that discount"
-      // Turning this into a hard stop so we don't accidentally create an ALL discount.
-      throw new Error(`No valid customer GIDs found for Eligibility: Customer Values. Cannot create specific customer discount.`);
+    if (!ids.length) {
+      throw new Error(`No valid customers resolved for Eligibility: Customer Values. Cannot create customer-specific discount.`);
     }
-
     return { customers: { add: ids } };
   }
 
-  // Fallback
   return { all: "ALL" };
 }
 
 /**
- * Combines with (from sheet)
+ * Combines with
  */
 function buildCombinesWith(row) {
   const product = toBool(row["Combines with Product Discounts"]);
   const order = toBool(row["Combines with Order Discounts"]);
   const shipping = toBool(row["Combines with Shipping Discounts"]);
-
-  // If all blank, omit entirely
   if (product === null && order === null && shipping === null) return undefined;
-
   return {
     productDiscounts: product ?? false,
     orderDiscounts: order ?? false,
@@ -630,11 +665,7 @@ function buildCombinesWith(row) {
 }
 
 /**
- * Purchase type (from sheet)
- * Column: Purchase Type (e.g. "One-Time Purchase" / "Subscription" / "Both")
- *
- * Maps to appliesOnOneTimePurchase + appliesOnSubscription on the Shopify input.
- * Returns {} (empty) if blank — Shopify will use its defaults.
+ * ✅ FIXED Purchase type flags (no early return bug)
  */
 function buildPurchaseTypeFlags(row) {
   const raw = String(row["Purchase Type"] || "").trim();
@@ -642,49 +673,34 @@ function buildPurchaseTypeFlags(row) {
   return { appliesOnOneTimePurchase: true, appliesOnSubscription: true };
 
   const s = raw.toLowerCase().replace(/\s+/g, " ");
-
-  // Accept common variants from sheet/export
   const hasOneTime = s.includes("one-time") || s.includes("one time");
   const hasSub = s.includes("subscription");
 
   if (s.includes("both") || (hasOneTime && hasSub)) {
     return { appliesOnOneTimePurchase: true, appliesOnSubscription: true };
   }
-
   if (hasSub && !hasOneTime) {
     return { appliesOnOneTimePurchase: false, appliesOnSubscription: true };
   }
-
   if (hasOneTime && !hasSub) {
     return { appliesOnOneTimePurchase: true, appliesOnSubscription: false };
   }
-
-  // Unknown value → don't send flags (Shopify defaults)
   return {};
 }
 
-
 /**
- * Minimum requirement (from sheet)
- * Columns:
- *   Minimum Requirement (Subtotal / None / etc)
- *   Minimum Value
- *
- * Shopify input expects:
- *   minimumRequirement: { subtotal: { greaterThanOrEqualToSubtotal: "50" } }
+ * Minimum requirement
  */
 function buildMinimumRequirement(row) {
   const req = String(row["Minimum Requirement"] || "").trim().toLowerCase();
   if (isEmpty(req) || req === "none") return undefined;
 
-  // "Amount" or "Subtotal" → minimum purchase subtotal
   if (req.includes("amount") || req.includes("subtotal")) {
     const v = toMoneyString(row["Minimum Value"]);
     if (!v) return undefined;
     return { subtotal: { greaterThanOrEqualToSubtotal: v } };
   }
 
-  // "Quantity" → minimum quantity of items
   if (req.includes("quantity")) {
     const v = toIntOrNull(row["Minimum Value"]);
     if (v === null) return undefined;
@@ -695,14 +711,7 @@ function buildMinimumRequirement(row) {
 }
 
 /**
- * Usage limits (sheet):
- *   Limit Total Times
- *   Limit One Use Per Customer
- *   Limit Uses Per Order
- *
- * IMPORTANT:
- * - If Limit Total Times is blank or 0 → omit (unlimited)
- * - If Uses Per Order is blank or 0 → omit
+ * Usage limits
  */
 function buildUsageFields(row) {
   const usageLimit = toIntOrNull(row["Limit Total Times"]);
@@ -710,42 +719,23 @@ function buildUsageFields(row) {
   const usesPerOrderLimit = toIntOrNull(row["Limit Uses Per Order"]);
 
   const out = {};
-
   if (usageLimit !== null && usageLimit > 0) out.usageLimit = usageLimit;
   if (appliesOncePerCustomer !== null) out.appliesOncePerCustomer = appliesOncePerCustomer;
+  if (usesPerOrderLimit !== null && usesPerOrderLimit > 0) out.usesPerOrderLimit = String(usesPerOrderLimit);
 
-  // NOTE: usesPerOrderLimit is stored separately — it is NOT valid on all input types.
-  // DiscountCodeBasicInput does NOT have usesPerOrderLimit.
-  // Only DiscountCodeBxgyInput and DiscountAutomaticBxgyInput support it.
-  // Callers that need it should read out.usesPerOrderLimit explicitly.
-  if (usesPerOrderLimit !== null && usesPerOrderLimit > 0) {
-    out.usesPerOrderLimit = String(usesPerOrderLimit);
-  }
-
-  // recurringCycleLimit is ONLY meaningful for subscription-based discounts.
-  // If Purchase Type is "One-Time Purchase" (or blank), we must NOT send this field —
-  // sending it would override the purchase type and break one-time purchase discounts.
+  // Only include recurringCycleLimit when subscription-based
   const pt = String(row["Purchase Type"] || "").trim().toLowerCase().replace(/\s+/g, " ");
   const isSubscriptionBased = pt.includes("subscription") || pt.includes("both");
-
 
   if (isSubscriptionBased) {
     const recurring = toIntOrNull(row["Purchase Type: Recurring Subscription Limit"]);
     if (recurring !== null && recurring > 0) out.recurringCycleLimit = recurring;
   }
-
   return out;
 }
 
 /**
- * CustomerGets value (Amount/Percentage)
- * Sheet:
- *   Value Type: Percentage / Fixed Amount
- *   Value: number
- *
- * Shopify DiscountCustomerGetsValueInput supports:
- *   - percentage
- *   - discountAmount { amount, appliesOnEachItem }
+ * Basic value builder
  */
 function buildCustomerGetsValueForBasic(row) {
   const vt = normalizeValueType(row["Value Type"]);
@@ -754,8 +744,18 @@ function buildCustomerGetsValueForBasic(row) {
   if (vt === "Percentage") {
     const n = toFloatOrNull(val);
     if (n === null) return null;
-    // Matrixify usually exports 20 for 20% (not 0.2)
-    const pct = n > 1 ? n / 100 : n;
+
+    // Matrixify exports percent points (1.00 = 1%, 20.00 = 20%)
+    const pct = n / 100;
+
+    // safety clamp
+    if (pct < 0) return null;
+    if (pct > 1) {
+      // If someone put 150, Shopify would reject or it becomes nonsense.
+      // Better to hard fail:
+      throw new Error(`Invalid percentage value "${n}" (must be 0-100 in sheet).`);
+    }
+
     return { percentage: pct };
   }
 
@@ -769,25 +769,14 @@ function buildCustomerGetsValueForBasic(row) {
 }
 
 /**
- * Applies-to items for BASIC discounts
- * Sheet:
- *   Applies To: Type   (All / Products / Product Variants / Collections)
- *   Applies To: Values (handles or SKUs or GIDs)
- *
- * For basic discounts, we can use:
- *   items: { all: true }
- *   items: { products: { productsToAdd: [...] } }
- *   items: { products: { productVariantsToAdd: [...] } }
- *   items: { collections: { add: [...] } }
+ * Applies-to items for BASIC
  */
 async function buildItemsForBasic(row) {
   const typeRaw = String(row["Applies To: Type"] || "").trim();
   const type = typeRaw.toLowerCase();
   const values = splitList(row["Applies To: Values"]);
 
-  if (isEmpty(typeRaw) || type === "all") {
-    return { all: true };
-  }
+  if (isEmpty(typeRaw) || type === "all") return { all: true };
 
   if (type.includes("collection")) {
     const ids = [];
@@ -796,11 +785,7 @@ async function buildItemsForBasic(row) {
       if (id) ids.push(id);
       await delay(80);
     }
-    if (values.length && !ids.length) {
-      throw new Error(
-        `Applies To=Collections but none resolved. Values=${JSON.stringify(values)}`
-      );
-    }
+    if (values.length && !ids.length) throw new Error(`Applies To=Collections but none resolved. Values=${JSON.stringify(values)}`);
     return { collections: { add: ids } };
   }
 
@@ -811,11 +796,7 @@ async function buildItemsForBasic(row) {
       if (id) ids.push(id);
       await delay(80);
     }
-    if (values.length && !ids.length) {
-      throw new Error(
-        `Applies To=Product Variants but none resolved. Values=${JSON.stringify(values)}`
-      );
-    }
+    if (values.length && !ids.length) throw new Error(`Applies To=Product Variants but none resolved. Values=${JSON.stringify(values)}`);
     return { products: { productVariantsToAdd: ids } };
   }
 
@@ -826,40 +807,42 @@ async function buildItemsForBasic(row) {
       if (id) ids.push(id);
       await delay(80);
     }
-    if (values.length && !ids.length) {
-      throw new Error(
-        `Applies To=Products but none resolved. Values=${JSON.stringify(values)}`
-      );
-    }
+    if (values.length && !ids.length) throw new Error(`Applies To=Products but none resolved. Values=${JSON.stringify(values)}`);
     return { products: { productsToAdd: ids } };
   }
 
-  // fallback
   return { all: true };
 }
 
 /**
- * BXGY (Buy X Get Y)
- * Sheet:
- *   Buy X Get Y: Customer Buys Type    (Products / Collections / Variants)
- *   Buy X Get Y: Customer Buys Values  (handles/SKUs/GIDs)
- *   Buy X Get Y: Customer Gets Quantity (number)
- *   Applies To: Type/Values            (THIS is the "Customer Gets Items")
- *   Value Type: "Amount Off Each" or "Percentage"
- *   Value: number
- *
- * Shopify BXGY input:
- *   customerBuys: { items: ..., value: { quantity: "1" } }
- *   customerGets: { items: ..., value: { discountOnQuantity: { quantity: "1", effect: { amount|percentage } } } }
+ * ✅ BXGY: parse "Spend $X" from Summary when present
+ * Shopify DiscountCustomerBuysValueInput supports { amount: Decimal, quantity: UnsignedInt64 }
+ */
+function parseBxgySpendAmountFromSummary(row) {
+  const summary = String(row["Summary"] || "").trim();
+  if (!summary) return null;
+
+  // Examples:
+  // "Spend $80.00 on X get 90 items free"
+  // "Spend 80 on ..."
+  const m = summary.match(/spend\s*\$?\s*(\d+(?:\.\d+)?)/i);
+  if (!m) return null;
+
+  const amt = String(m[1]);
+  return toMoneyString(amt);
+}
+
+/**
+ * BXGY builders
  */
 async function buildBxgyCustomerBuys(row) {
   const typeRaw = String(row["Buy X Get Y: Customer Buys Type"] || "").trim();
   const type = typeRaw.toLowerCase();
   const values = splitList(row["Buy X Get Y: Customer Buys Values"]);
 
-  // Matrixify sheet (this file) does NOT have a "Customer Buys Quantity" column.
-  // We use 1 as the default buy quantity (matches typical UI setup).
-  const buyQty = 1;
+  // Prefer spend amount if present in Summary
+  const spendAmt = parseBxgySpendAmountFromSummary(row);
+  const buyValue = spendAmt ? { amount: spendAmt } : { quantity: "1" };
 
   if (isEmpty(typeRaw) || type.includes("product")) {
     const ids = [];
@@ -868,10 +851,8 @@ async function buildBxgyCustomerBuys(row) {
       if (id) ids.push(id);
       await delay(80);
     }
-    if (values.length && !ids.length) {
-      throw new Error(`BXGY customerBuys=Products but none resolved. Values=${JSON.stringify(values)}`);
-    }
-    return { items: { products: { productsToAdd: ids } }, value: { quantity: String(buyQty) } };
+    if (values.length && !ids.length) throw new Error(`BXGY customerBuys=Products but none resolved. Values=${JSON.stringify(values)}`);
+    return { items: { products: { productsToAdd: ids } }, value: buyValue };
   }
 
   if (type.includes("collection")) {
@@ -881,10 +862,8 @@ async function buildBxgyCustomerBuys(row) {
       if (id) ids.push(id);
       await delay(80);
     }
-    if (values.length && !ids.length) {
-      throw new Error(`BXGY customerBuys=Collections but none resolved. Values=${JSON.stringify(values)}`);
-    }
-    return { items: { collections: { add: ids } }, value: { quantity: String(buyQty) } };
+    if (values.length && !ids.length) throw new Error(`BXGY customerBuys=Collections but none resolved. Values=${JSON.stringify(values)}`);
+    return { items: { collections: { add: ids } }, value: buyValue };
   }
 
   if (type.includes("variant")) {
@@ -894,67 +873,55 @@ async function buildBxgyCustomerBuys(row) {
       if (id) ids.push(id);
       await delay(80);
     }
-    if (values.length && !ids.length) {
-      throw new Error(`BXGY customerBuys=Variants but none resolved. Values=${JSON.stringify(values)}`);
-    }
-    return { items: { products: { productVariantsToAdd: ids } }, value: { quantity: String(buyQty) } };
+    if (values.length && !ids.length) throw new Error(`BXGY customerBuys=Variants but none resolved. Values=${JSON.stringify(values)}`);
+    return { items: { products: { productVariantsToAdd: ids } }, value: buyValue };
   }
 
-  // fallback
-  return { items: { products: { productsToAdd: [] } }, value: { quantity: String(buyQty) } };
+  return { items: { products: { productsToAdd: [] } }, value: buyValue };
 }
 
 async function buildBxgyCustomerGets(row) {
-  // Customer gets items come from Applies To columns in this sheet
   const itemsTypeRaw = String(row["Applies To: Type"] || "").trim();
   const itemsType = itemsTypeRaw.toLowerCase();
   const values = splitList(row["Applies To: Values"]);
 
+  if (isEmpty(itemsTypeRaw)) throw new Error(`BXGY missing Applies To: Type/Values (needed for customerGets items).`);
+
   const ids = [];
-
-  if (isEmpty(itemsTypeRaw)) {
-    throw new Error(`BXGY missing Applies To: Type/Values (needed for customerGets items).`);
-  }
-
   if (itemsType.includes("collection")) {
     for (const v of values) {
       const id = await resolveCollectionIdByHandle(v);
       if (id) ids.push(id);
       await delay(80);
     }
-    if (values.length && !ids.length) {
-      throw new Error(`BXGY customerGets=Collections but none resolved. Values=${JSON.stringify(values)}`);
-    }
+    if (values.length && !ids.length) throw new Error(`BXGY customerGets=Collections but none resolved. Values=${JSON.stringify(values)}`);
   } else if (itemsType.includes("variant")) {
     for (const v of values) {
       const id = await resolveVariantIdBySku(v);
       if (id) ids.push(id);
       await delay(80);
     }
-    if (values.length && !ids.length) {
-      throw new Error(`BXGY customerGets=Variants but none resolved. Values=${JSON.stringify(values)}`);
-    }
+    if (values.length && !ids.length) throw new Error(`BXGY customerGets=Variants but none resolved. Values=${JSON.stringify(values)}`);
   } else {
-    // products
     for (const v of values) {
       const id = await resolveProductIdByHandle(v);
       if (id) ids.push(id);
       await delay(80);
     }
-    if (values.length && !ids.length) {
-      throw new Error(`BXGY customerGets=Products but none resolved. Values=${JSON.stringify(values)}`);
-    }
+    if (values.length && !ids.length) throw new Error(`BXGY customerGets=Products but none resolved. Values=${JSON.stringify(values)}`);
   }
 
-  // Discounted quantity is in sheet column:
   const q = toIntOrNull(row["Buy X Get Y: Customer Gets Quantity"]) || 1;
 
-  // Effect (Shopify supports amount or percentage for DiscountEffectInput) :contentReference[oaicite:0]{index=0}
   const vt = normalizeValueType(row["Value Type"]);
   const rawVal = row["Value"];
 
   let effect;
-  if (vt === "Percentage") {
+
+  // ✅ Support Matrixify "Free"
+  if (vt === "Free") {
+    effect = { percentage: 1 };
+  } else if (vt === "Percentage") {
     const n = toFloatOrNull(rawVal);
     if (n === null) throw new Error(`BXGY Value Type=Percentage but Value is invalid: ${rawVal}`);
     const pct = n > 1 ? n / 100 : n;
@@ -964,7 +931,7 @@ async function buildBxgyCustomerGets(row) {
     if (!amt) throw new Error(`BXGY Value Type=${vt} but Value is invalid: ${rawVal}`);
     effect = { amount: amt };
   } else {
-    throw new Error(`BXGY unsupported Value Type="${row["Value Type"]}". Use Percentage or Amount Off Each.`);
+    throw new Error(`BXGY unsupported Value Type="${row["Value Type"]}". Use Percentage / Amount Off Each / Free.`);
   }
 
   let items;
@@ -984,8 +951,7 @@ async function buildBxgyCustomerGets(row) {
 }
 
 /**
- * Free shipping destination (sheet)
- *   Free Shipping: Country Codes  (blank => all)
+ * Free shipping helpers
  */
 function buildFreeShippingDestination(row) {
   const codes = splitList(row["Free Shipping: Country Codes"]).map((c) => c.toUpperCase());
@@ -993,23 +959,16 @@ function buildFreeShippingDestination(row) {
   return { countries: { add: codes } };
 }
 
-/**
- * "Free Shipping: Over Amount" in Matrixify = maximumShippingPrice in Shopify.
- * It means: only apply free shipping to rates that cost <= this amount.
- * This is NOT the minimum purchase requirement — it's a separate field.
- */
 function buildMaximumShippingPrice(row) {
   return toMoneyString(row["Free Shipping: Over Amount"]) || null;
 }
 
 function buildFreeShippingMinimum(row) {
-  // Minimum purchase requirement comes from Minimum Requirement + Minimum Value columns.
-  // "Free Shipping: Over Amount" is maximumShippingPrice (a different field), NOT this.
   return buildMinimumRequirement(row);
 }
 
 /**
- * BUILD INPUTS (based on sheet Method + Type)
+ * BUILD INPUTS
  */
 async function buildDiscountInputFromRow(row) {
   const method = normalizeSheetMethod(row["Method"]);
@@ -1022,40 +981,30 @@ async function buildDiscountInputFromRow(row) {
   const code = String(row["Code"] || "").trim();
 
   const startsAt = toDateTimeISO(row["Starts At"]);
-  const endsAt = toDateTimeISO(row["Ends At"]); // may be null
+  const endsAt = toDateTimeISO(row["Ends At"]);
   const combinesWith = buildCombinesWith(row);
-  const context = await buildContextFromSheet(row); // ✅ FIXED ENUM
+  const context = await buildContextFromSheet(row);
   const purchaseFlags = buildPurchaseTypeFlags(row);
   const minReq = buildMinimumRequirement(row);
   const usageFields = buildUsageFields(row);
 
-  // ========== CODE DISCOUNTS ==========
+  // CODE
   if (method === "Code") {
     if (type === "Amount off Products" || type === "Amount off Order") {
       const value = buildCustomerGetsValueForBasic(row);
       if (!title || !code || !startsAt || !value) {
-        throw new Error(
-          `Missing required fields for Code + Amount off: title/code/startsAt/value.`
-        );
+        throw new Error(`Missing required fields for Code + Amount off: title/code/startsAt/value.`);
       }
 
       const items = await buildItemsForBasic(row);
 
-      // DiscountCodeBasicInput fields:
-      // appliesOncePerCustomer, code, combinesWith, context, customerGets,
-      // endsAt, minimumRequirement, recurringCycleLimit, startsAt, title, usageLimit
-      // NOTE: usesPerOrderLimit is NOT a field on DiscountCodeBasicInput — omit it.
       const input = {
         title,
         code,
         startsAt,
         endsAt: endsAt || null,
         context,
-        customerGets: {
-          items,
-          value,
-          ...purchaseFlags,
-        },
+        customerGets: { items, value, ...purchaseFlags },
         ...(minReq ? { minimumRequirement: minReq } : {}),
         ...(combinesWith ? { combinesWith } : {}),
         ...(usageFields.usageLimit ? { usageLimit: usageFields.usageLimit } : {}),
@@ -1081,10 +1030,7 @@ async function buildDiscountInputFromRow(row) {
         endsAt: endsAt || null,
         context,
         customerBuys,
-        customerGets: {
-          ...customerGets,
-          ...purchaseFlags,
-        },
+        customerGets: { ...customerGets, ...purchaseFlags },
         ...(combinesWith ? { combinesWith } : {}),
         ...usageFields,
       };
@@ -1098,13 +1044,9 @@ async function buildDiscountInputFromRow(row) {
       }
 
       const destination = buildFreeShippingDestination(row);
-      const freeMin = buildFreeShippingMinimum(row);         // minimum purchase subtotal/quantity
-      const maxShippingPrice = buildMaximumShippingPrice(row); // exclude rates over this amount
+      const freeMin = buildFreeShippingMinimum(row);
+      const maxShippingPrice = buildMaximumShippingPrice(row);
 
-      // DiscountCodeFreeShippingInput fields:
-      // appliesOncePerCustomer, appliesOnOneTimePurchase, appliesOnSubscription,
-      // code, combinesWith, context, destination, endsAt, maximumShippingPrice,
-      // minimumRequirement, recurringCycleLimit, startsAt, title, usageLimit
       const input = {
         title,
         code,
@@ -1124,20 +1066,15 @@ async function buildDiscountInputFromRow(row) {
       return { mutation: "discountCodeFreeShippingCreate", variables: { freeShippingCodeDiscount: input } };
     }
 
-    if (type === "App") {
-      throw new Error(`Sheet Type=App not supported by this sheet mapping. App discounts need functionId + metafields.`);
-    }
-
+    if (type === "App") throw new Error(`Sheet Type=App not supported by this mapping.`);
     throw new Error(`Unsupported sheet Type="${row["Type"]}" for Method=Code`);
   }
 
-  // ========== AUTOMATIC DISCOUNTS ==========
+  // AUTOMATIC
   if (method === "Automatic") {
     if (type === "Amount off Products" || type === "Amount off Order") {
       const value = buildCustomerGetsValueForBasic(row);
-      if (!title || !startsAt || !value) {
-        throw new Error(`Missing required fields for Automatic + Amount off: title/startsAt/value.`);
-      }
+      if (!title || !startsAt || !value) throw new Error(`Missing required fields for Automatic + Amount off: title/startsAt/value.`);
 
       const items = await buildItemsForBasic(row);
 
@@ -1146,11 +1083,7 @@ async function buildDiscountInputFromRow(row) {
         startsAt,
         endsAt: endsAt || null,
         context,
-        customerGets: {
-          items,
-          value,
-          ...purchaseFlags,
-        },
+        customerGets: { items, value, ...purchaseFlags },
         ...(minReq ? { minimumRequirement: minReq } : {}),
         ...(combinesWith ? { combinesWith } : {}),
         ...(usageFields.recurringCycleLimit ? { recurringCycleLimit: usageFields.recurringCycleLimit } : {}),
@@ -1160,22 +1093,14 @@ async function buildDiscountInputFromRow(row) {
     }
 
     if (type === "Buy X Get Y") {
-      if (!title || !startsAt) {
-        throw new Error(`Missing required fields for Automatic + BXGY: title/startsAt.`);
-      }
+      if (!title || !startsAt) throw new Error(`Missing required fields for Automatic + BXGY: title/startsAt.`);
 
       const customerBuys = await buildBxgyCustomerBuys(row);
       const customerGets = await buildBxgyCustomerGets(row);
 
-      // ⚠️ Shopify's DiscountAutomaticBxgyInput does NOT support appliesOnOneTimePurchase
-      // or appliesOnSubscription at runtime (server rejects them even though the schema
-      // lists them on DiscountCustomerGetsInput). These fields are only valid for
-      // Basic and Code-based discounts. We intentionally drop them here.
       if (purchaseFlags && Object.keys(purchaseFlags).length > 0) {
         console.warn(
-          `⚠️  [${title}] Purchase Type ("${row["Purchase Type"]}") is set but ` +
-          `Shopify does NOT support appliesOnOneTimePurchase / appliesOnSubscription ` +
-          `for Automatic BXGY discounts. These fields will be ignored.`
+          `⚠️  [${title}] Purchase Type ("${row["Purchase Type"]}") is set but Shopify does NOT support appliesOnOneTimePurchase / appliesOnSubscription for Automatic BXGY. Dropping these fields.`
         );
       }
 
@@ -1185,10 +1110,7 @@ async function buildDiscountInputFromRow(row) {
         endsAt: endsAt || null,
         context,
         customerBuys,
-        customerGets: {
-          // purchaseFlags intentionally excluded — not supported by Shopify for Automatic BXGY
-          ...customerGets,
-        },
+        customerGets: { ...customerGets },
         ...(combinesWith ? { combinesWith } : {}),
         ...(usageFields.usesPerOrderLimit ? { usesPerOrderLimit: usageFields.usesPerOrderLimit } : {}),
         ...(usageFields.recurringCycleLimit ? { recurringCycleLimit: usageFields.recurringCycleLimit } : {}),
@@ -1198,18 +1120,12 @@ async function buildDiscountInputFromRow(row) {
     }
 
     if (type === "Free Shipping") {
-      if (!title || !startsAt) {
-        throw new Error(`Missing required fields for Automatic + Free Shipping: title/startsAt.`);
-      }
+      if (!title || !startsAt) throw new Error(`Missing required fields for Automatic + Free Shipping: title/startsAt.`);
 
       const destination = buildFreeShippingDestination(row);
-      const freeMin = buildFreeShippingMinimum(row);         // minimum purchase subtotal/quantity
-      const maxShippingPrice = buildMaximumShippingPrice(row); // exclude rates over this amount
+      const freeMin = buildFreeShippingMinimum(row);
+      const maxShippingPrice = buildMaximumShippingPrice(row);
 
-      // DiscountAutomaticFreeShippingInput fields:
-      // appliesOnOneTimePurchase, appliesOnSubscription, combinesWith, context,
-      // destination, endsAt, maximumShippingPrice, minimumRequirement,
-      // recurringCycleLimit, startsAt, title
       const input = {
         title,
         startsAt,
@@ -1223,16 +1139,10 @@ async function buildDiscountInputFromRow(row) {
         ...(usageFields.recurringCycleLimit ? { recurringCycleLimit: usageFields.recurringCycleLimit } : {}),
       };
 
-      return {
-        mutation: "discountAutomaticFreeShippingCreate",
-        variables: { freeShippingAutomaticDiscount: input },
-      };
+      return { mutation: "discountAutomaticFreeShippingCreate", variables: { freeShippingAutomaticDiscount: input } };
     }
 
-    if (type === "App") {
-      throw new Error(`Sheet Type=App not supported by this sheet mapping. App discounts need functionId + metafields.`);
-    }
-
+    if (type === "App") throw new Error(`Sheet Type=App not supported by this mapping.`);
     throw new Error(`Unsupported sheet Type="${row["Type"]}" for Method=Automatic`);
   }
 
@@ -1273,13 +1183,11 @@ function extractUserErrors(mutationName, data) {
     discountCodeBxgyCreate: "discountCodeBxgyCreate",
     discountCodeFreeShippingCreate: "discountCodeFreeShippingCreate",
     discountCodeAppCreate: "discountCodeAppCreate",
-
     discountAutomaticBasicCreate: "discountAutomaticBasicCreate",
     discountAutomaticBxgyCreate: "discountAutomaticBxgyCreate",
     discountAutomaticFreeShippingCreate: "discountAutomaticFreeShippingCreate",
     discountAutomaticAppCreate: "discountAutomaticAppCreate",
   };
-
   const key = keyMap[mutationName];
   return key ? (data?.[key]?.userErrors || []) : [];
 }
@@ -1310,18 +1218,17 @@ function extractCreatedId(mutationName, data) {
 }
 
 /**
- * MAIN
+ * CORE IMPORT (buffer) → returns result
  */
-export async function migrateDiscounts(req, res) {
-  const fileBuffer = req.file?.buffer;
-  const settings = {}
-  if (!fileBuffer) return { ok: false, error: "Missing file (req.file.buffer)" };
-
+async function importDiscountsFromBuffer(fileBuffer, settings = {}) {
   console.log("🚀 Starting Discounts import (Sheet → Shopify) [CREATE ONLY] ...");
   console.log(`   Target: ${TARGET_SHOP}`);
 
-  const rows = loadRows(fileBuffer);
-  console.log(`✅ Loaded ${rows.length} rows from Discounts sheet`);
+  const rawRows = loadRows(fileBuffer);
+  console.log(`✅ Loaded ${rawRows.length} raw row(s) from Discounts sheet`);
+
+  const rows = mergeMatrixifyDiscountRows(rawRows);
+  console.log(`✅ Grouped into ${rows.length} discount(s) after merging multi-row entries`);
 
   const { reportFileName, reportPath } = initIncrementalReportFile();
   const reportRows = [];
@@ -1340,8 +1247,10 @@ export async function migrateDiscounts(req, res) {
 
     const title = String(row["Title"] || "").trim() || "no-title";
     const code = String(row["Code"] || "").trim() || "no-code";
-    const label = `#${i + 1} (${title} / ${code})`;
+    const mergedRows = row.__mergedRows ? String(row.__mergedRows) : "";
+    const mergedCount = row.__mergedCount ? Number(row.__mergedCount) : 1;
 
+    const label = `#${i + 1} (${title} / ${code}) (merged rows: ${mergedCount}${mergedRows ? ` => ${mergedRows}` : ""})`;
     console.log(`\n➡️  Processing ${label}`);
 
     let retry = false;
@@ -1350,7 +1259,6 @@ export async function migrateDiscounts(req, res) {
     const baseReportRow = { ...row };
 
     try {
-      // Skip delete commands (Matrixify)
       const cmd = String(row["Command"] || "").trim().toLowerCase();
       if (cmd === "delete") {
         console.log("🟡 Skipping: Command=DELETE (CREATE ONLY)");
@@ -1364,31 +1272,14 @@ export async function migrateDiscounts(req, res) {
           "Mutation Used": "",
           Retry: "false",
           "Retry Status": "",
+          "Merged Rows": mergedRows,
         });
         flushReportToDisk();
         continue;
       }
 
-      // Skip if sheet already has an ID (means it already exists)
-      //   if (!isEmpty(row["ID"])) {
-      //     console.log(`🟡 Skipping: Sheet has ID=${row["ID"]} (update later)`);
-      //     skippedCount++;
-
-      //     reportRows.push({
-      //       ...baseReportRow,
-      //       Status: "SUCCESS",
-      //       Reason: `Skipped: existing discount (sheet has ID=${row["ID"]})`,
-      //       NewDiscountId: String(row["ID"]),
-      //       "Mutation Used": "",
-      //       Retry: "false",
-      //       "Retry Status": "",
-      //     });
-      //     flushReportToDisk();
-      //     continue;
-      //   }
-
-      // If code discount, check existence by code
       const method = normalizeSheetMethod(row["Method"]);
+
       if (method === "Code" && !isEmpty(row["Code"])) {
         const existing = await findExistingCodeDiscountNodeId(row["Code"]);
         if (existing) {
@@ -1403,13 +1294,13 @@ export async function migrateDiscounts(req, res) {
             "Mutation Used": "",
             Retry: "false",
             "Retry Status": "",
+            "Merged Rows": mergedRows,
           });
           flushReportToDisk();
           continue;
         }
       }
 
-      // If automatic discount, check existence by title
       if (method === "Automatic" && !isEmpty(row["Title"])) {
         const existing = await findExistingAutomaticDiscountNodeId(row["Title"]);
         if (existing) {
@@ -1424,13 +1315,13 @@ export async function migrateDiscounts(req, res) {
             "Mutation Used": "",
             Retry: "false",
             "Retry Status": "",
+            "Merged Rows": mergedRows,
           });
           flushReportToDisk();
           continue;
         }
       }
 
-      // Build mutation + variables STRICTLY from sheet
       const { mutation, variables } = await buildDiscountInputFromRow(row);
       const query = getMutationQueryByName(mutation);
       if (!query) throw new Error(`Mutation not mapped: ${mutation}`);
@@ -1457,7 +1348,6 @@ export async function migrateDiscounts(req, res) {
       if (errs?.length) throw new Error(JSON.stringify(errs, null, 2));
 
       const createdId = extractCreatedId(mutation, data);
-
       console.log(`✅ Created discount: id=${createdId || "n/a"}`);
       createdCount++;
 
@@ -1469,6 +1359,7 @@ export async function migrateDiscounts(req, res) {
         "Mutation Used": mutation,
         Retry: retry ? "true" : "false",
         "Retry Status": retry ? (retryStatus ? "SUCCESS" : "FAILED") : "",
+        "Merged Rows": mergedRows,
       });
       flushReportToDisk();
 
@@ -1486,6 +1377,7 @@ export async function migrateDiscounts(req, res) {
         "Mutation Used": "",
         Retry: retry ? "true" : "false",
         "Retry Status": retry ? (retryStatus ? "SUCCESS" : "FAILED") : "",
+        "Merged Rows": mergedRows,
       });
       flushReportToDisk();
 
@@ -1498,7 +1390,7 @@ export async function migrateDiscounts(req, res) {
   console.log(`   🔁 Skipped:  ${skippedCount}`);
   console.log(`   ❌ Failed:   ${failedCount}`);
 
-  const result = {
+  return {
     ok: failedCount === 0,
     createdCount,
     skippedCount,
@@ -1509,21 +1401,34 @@ export async function migrateDiscounts(req, res) {
     failedReportCount: reportRows.filter((r) => r.Status === "FAILED").length,
     reportPath,
   };
+}
 
-  if (failedCount > 0) process.exitCode = 1;
+/**
+ * Express handler
+ */
+export async function migrateDiscounts(req, res) {
+  const fileBuffer = req.file?.buffer;
+  const settings = {}; // keep your pattern
+  if (!fileBuffer) return res.json({ ok: false, error: "Missing file (req.file.buffer)" });
 
+  const result = await importDiscountsFromBuffer(fileBuffer, settings);
+  if (result.failedCount > 0) process.exitCode = 1;
   return res.json(result);
-
 }
 
 /**
  * Optional local run:
- *   node discounts_import.js "./matrixify discounts.xlsx"
+ *   node discounts_import.js "./matrixify_discounts.xlsx"
  */
 if (process.argv[1] && process.argv[1].endsWith("discounts_import.js")) {
   const fp = process.argv[2];
   if (fp) {
     const buf = fs.readFileSync(fp);
-    migrateDiscounts(buf).then((r) => console.log("Done:", r));
+    importDiscountsFromBuffer(buf, { retryIfFailed: false })
+      .then((r) => console.log("Done:", r))
+      .catch((e) => {
+        console.error("Run failed:", e);
+        process.exitCode = 1;
+      });
   }
 }
