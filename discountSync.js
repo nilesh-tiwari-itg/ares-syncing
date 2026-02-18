@@ -670,7 +670,7 @@ function buildCombinesWith(row) {
 function buildPurchaseTypeFlags(row) {
   const raw = String(row["Purchase Type"] || "").trim();
   if (isEmpty(raw)) return {};
-  return { appliesOnOneTimePurchase: true, appliesOnSubscription: true };
+  // return { appliesOnOneTimePurchase: true, appliesOnSubscription: true };
 
   const s = raw.toLowerCase().replace(/\s+/g, " ");
   const hasOneTime = s.includes("one-time") || s.includes("one time");
@@ -840,10 +840,47 @@ async function buildBxgyCustomerBuys(row) {
   const type = typeRaw.toLowerCase();
   const values = splitList(row["Buy X Get Y: Customer Buys Values"]);
 
-  // Prefer spend amount if present in Summary
+  // 1) Prefer "Spend $X" encoded in Summary (your sheet has this)
   const spendAmt = parseBxgySpendAmountFromSummary(row);
-  const buyValue = spendAmt ? { amount: spendAmt } : { quantity: "1" };
+  if (spendAmt) {
+    return await buildBxgyCustomerBuysItemsOnly(typeRaw, type, values, { amount: spendAmt });
+  }
 
+  // 2) Otherwise, for BXGY Matrixify uses Minimum Requirement/Value as the BUY X requirement
+  // Example in your sheet: Minimum Requirement = Quantity, Minimum Value = 700
+  const minReq = String(row["Minimum Requirement"] || "").trim().toLowerCase();
+  const minValQty = toIntOrNull(row["Minimum Value"]);
+
+  const buyValue =
+    (minReq.includes("quantity") && minValQty && minValQty > 0)
+      ? { quantity: String(minValQty) }
+      : { quantity: null }; // fallback
+
+  return await buildBxgyCustomerBuysItemsOnly(typeRaw, type, values, buyValue);
+}
+
+function buildBxgyPurchaseFlags(row) {
+  const raw = String(row["Purchase Type"] || "").trim().toLowerCase().replace(/\s+/g, " ");
+  if (!raw) return {}; // let Shopify defaults apply
+
+  const hasOneTime = raw.includes("one-time") || raw.includes("one time");
+  const hasSub = raw.includes("subscription");
+
+  if (raw.includes("both") || (hasOneTime && hasSub)) {
+    return { isOneTimePurchase: true, isSubscription: true };
+  }
+  if (hasSub && !hasOneTime) {
+    return { isOneTimePurchase: false, isSubscription: true };
+  }
+  if (hasOneTime && !hasSub) {
+    return { isOneTimePurchase: true, isSubscription: false };
+  }
+  return {};
+}
+
+
+// helper to avoid repeating the same items-resolution logic
+async function buildBxgyCustomerBuysItemsOnly(typeRaw, type, values, buyValue) {
   if (isEmpty(typeRaw) || type.includes("product")) {
     const ids = [];
     for (const v of values) {
@@ -851,7 +888,9 @@ async function buildBxgyCustomerBuys(row) {
       if (id) ids.push(id);
       await delay(80);
     }
-    if (values.length && !ids.length) throw new Error(`BXGY customerBuys=Products but none resolved. Values=${JSON.stringify(values)}`);
+    if (values.length && !ids.length) {
+      throw new Error(`BXGY customerBuys=Products but none resolved. Values=${JSON.stringify(values)}`);
+    }
     return { items: { products: { productsToAdd: ids } }, value: buyValue };
   }
 
@@ -862,7 +901,9 @@ async function buildBxgyCustomerBuys(row) {
       if (id) ids.push(id);
       await delay(80);
     }
-    if (values.length && !ids.length) throw new Error(`BXGY customerBuys=Collections but none resolved. Values=${JSON.stringify(values)}`);
+    if (values.length && !ids.length) {
+      throw new Error(`BXGY customerBuys=Collections but none resolved. Values=${JSON.stringify(values)}`);
+    }
     return { items: { collections: { add: ids } }, value: buyValue };
   }
 
@@ -873,7 +914,9 @@ async function buildBxgyCustomerBuys(row) {
       if (id) ids.push(id);
       await delay(80);
     }
-    if (values.length && !ids.length) throw new Error(`BXGY customerBuys=Variants but none resolved. Values=${JSON.stringify(values)}`);
+    if (values.length && !ids.length) {
+      throw new Error(`BXGY customerBuys=Variants but none resolved. Values=${JSON.stringify(values)}`);
+    }
     return { items: { products: { productVariantsToAdd: ids } }, value: buyValue };
   }
 
@@ -1097,6 +1140,8 @@ async function buildDiscountInputFromRow(row) {
 
       const customerBuys = await buildBxgyCustomerBuys(row);
       const customerGets = await buildBxgyCustomerGets(row);
+      const bxgyFlags = buildBxgyPurchaseFlags(row);
+
 
       if (purchaseFlags && Object.keys(purchaseFlags).length > 0) {
         console.warn(
@@ -1109,7 +1154,7 @@ async function buildDiscountInputFromRow(row) {
         startsAt,
         endsAt: endsAt || null,
         context,
-        customerBuys,
+        customerBuys: { ...customerBuys, ...bxgyFlags },
         customerGets: { ...customerGets },
         ...(combinesWith ? { combinesWith } : {}),
         ...(usageFields.usesPerOrderLimit ? { usesPerOrderLimit: usageFields.usesPerOrderLimit } : {}),
